@@ -1,0 +1,16 @@
+p0*(1-padv)*(1-pch+pch*p0)
+p0*(padv*(1-px + px*p1/(1-p0))+(1-padv)*pch*p1)
+p0*(1-padv)*pch*p2
+p0*(1-padv)*pch*(1-p0-p1-p2)
+p1*(1-padv)*pch*p0
+p1*(padv*(1-px + px*p1/(1-p0)) + (1-padv)*(1-pch+pch*p1))
+p1*(1-padv)*pch*p2
+p1*(1-padv)*pch*(1-p0-p1-p2)
+p2*(1-padv)*pch*p0
+p2*(padv*(1-px + px*p1/(1-p0))+(1-padv)*pch*p1)
+p2*(padv*px*p2/(1-p0) + (1-padv)*(1-pch+pch*p2))
+p2*(1-padv)*pch*(1-p0-p1-p2)
+(1-p0-p1-p2)*(1-padv)*pch*p0
+(1-p0-p1-p2)*(padv*(1-px + px*p1/(1-p0))+(1-padv)*pch*p1)
+(1-p0-p1-p2)*(1-padv)*pch*p2
+(1-p0-p1-p2)*(padv*px*(1-p0-p1-p2)/(1-p0) + (1-padv)*(1-pch+pch*(1-p0-p1-p2)))

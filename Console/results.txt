@@ -1,0 +1,116 @@
+
+****************
+0  l_dot[i] 
+
+n_0_0*(padv*px+(1-padv)*(1-pch+pch*p0)+p0*(1-padv)*pch)*p0^(-1)*(padv*px+(1-padv)*(1-pch+pch*p0))^(-1)
++n_0_2*p0^(-1)
++n_0_3*((1-padv)*pch*(1-p0-p1-p2)-p0*(1-padv)*pch)*p0^(-1)*(1-padv)^(-1)*pch^(-1)*(1-p0-p1-p2)^(-1)
++n_1_0*(1-padv)*pch*(padv*px+(1-padv)*pch*p0)^(-1)
+-n_1_3*(1-p0-p1-p2)^(-1)
++n_2_0*(1-padv)*pch*(padv*px+(1-padv)*pch*p0)^(-1)
+-n_2_3*(1-p0-p1-p2)^(-1)
++n_3_0*(-(padv*px+(1-padv)*pch*p0)+(1-p0-p1-p2)*(1-padv)*pch)*(1-p0-p1-p2)^(-1)*(padv*px+(1-padv)*pch*p0)^(-1)
+-n_3_1*(1-p0-p1-p2)^(-1)
+-n_3_2*(1-p0-p1-p2)^(-1)
++n_3_3*(-(1-padv)*(1-pch+pch*(1-p0-p1-p2))-(1-p0-p1-p2)*(1-padv)*pch)*(1-p0-p1-p2)^(-1)*(1-padv)^(-1)*(1-pch+pch*(1-p0-p1-p2))^(-1)
+ 
+l_dot[i] -0.128548
+
+
+
+****************
+1  l_dot[i] 
+
+-n_0_3*(1-p0-p1-p2)^(-1)
++n_1_0*p1^(-1)
++n_1_1*(padv*(1-px)+(1-padv)*(1-pch+pch*p1)+p1*(1-padv)*pch)*p1^(-1)*(padv*(1-px)+(1-padv)*(1-pch+pch*p1))^(-1)
++n_1_2*p1^(-1)
++n_1_3*((1-padv)*pch*(1-p0-p1-p2)-p1*(1-padv)*pch)*p1^(-1)*(1-padv)^(-1)*pch^(-1)*(1-p0-p1-p2)^(-1)
++n_2_1*(1-padv)*pch*(padv*(1-px)+(1-padv)*pch*p1)^(-1)
+-n_2_3*(1-p0-p1-p2)^(-1)
+-n_3_0*(1-p0-p1-p2)^(-1)
++n_3_1*(-(padv*(1-px)+(1-padv)*pch*p1)+(1-p0-p1-p2)*(1-padv)*pch)*(1-p0-p1-p2)^(-1)*(padv*(1-px)+(1-padv)*pch*p1)^(-1)
+-n_3_2*(1-p0-p1-p2)^(-1)
++n_3_3*(-(1-padv)*(1-pch+pch*(1-p0-p1-p2))-(1-p0-p1-p2)*(1-padv)*pch)*(1-p0-p1-p2)^(-1)*(1-padv)^(-1)*(1-pch+pch*(1-p0-p1-p2))^(-1)
+ 
+l_dot[i] -0.0353376
+
+
+
+****************
+2  l_dot[i] 
+
+n_0_2*p2^(-1)
+-n_0_3*(1-p0-p1-p2)^(-1)
++n_1_2*p2^(-1)
+-n_1_3*(1-p0-p1-p2)^(-1)
++n_2_0*p2^(-1)
++n_2_1*p2^(-1)
++n_2_2*((1-padv)*(1-pch+pch*p2)+p2*(1-padv)*pch)*p2^(-1)*(1-padv)^(-1)*(1-pch+pch*p2)^(-1)
++n_2_3*((1-padv)*pch*(1-p0-p1-p2)-p2*(1-padv)*pch)*p2^(-1)*(1-padv)^(-1)*pch^(-1)*(1-p0-p1-p2)^(-1)
+-n_3_0*(1-p0-p1-p2)^(-1)
+-n_3_1*(1-p0-p1-p2)^(-1)
++n_3_2*(-(1-padv)*pch*p2+(1-p0-p1-p2)*(1-padv)*pch)*(1-p0-p1-p2)^(-1)*(1-padv)^(-1)*pch^(-1)*p2^(-1)
++n_3_3*(-(1-padv)*(1-pch+pch*(1-p0-p1-p2))-(1-p0-p1-p2)*(1-padv)*pch)*(1-p0-p1-p2)^(-1)*(1-padv)^(-1)*(1-pch+pch*(1-p0-p1-p2))^(-1)
+ 
+
+l_dot[i] 0.00401832
+
+
+
+****************pch
+3  l_dot[i] 
+
+n_0_0*(1-padv)*(-1+p0)*(padv*px+(1-padv)*(1-pch+pch*p0))^(-1)+
+n_0_2*pch^(-1)+n_0_3*pch^(-1)+
+n_1_0*(1-padv)*p0*(padv*px+(1-padv)*pch*p0)^(-1)+
+n_1_1*(1-padv)*(-1+p1)*(padv*(1-px)+(1-padv)*(1-pch+pch*p1))^(-1)+
+n_1_2*pch^(-1)+
+n_1_3*pch^(-1)+
+n_2_0*(1-padv)*p0*(padv*px+(1-padv)*pch*p0)^(-1)+
+n_2_1*(1-padv)*p1*(padv*(1-px)+(1-padv)*pch*p1)^(-1)+
+n_2_2*(-1+p2)*(1-pch+pch*p2)^(-1)+
+n_2_3*pch^(-1)+
+n_3_0*(1-padv)*p0*(padv*px+(1-padv)*pch*p0)^(-1)+
+n_3_1*(1-padv)*p1*(padv*(1-px)+(1-padv)*pch*p1)^(-1)+
+n_3_2*pch^(-1)+n_3_3*(-p0-p1-p2)*(1-pch+pch*(1-p0-p1-p2))^(-1)
+
+ l_dot[i] -0.0634483
+
+
+
+****************px
+4  l_dot[i] 
+
+n_0_0*padv*(padv*px+(1-padv)*(1-pch+pch*p0))^(-1)
++n_1_0*padv*(padv*px+(1-padv)*pch*p0)^(-1)
+-n_1_1*padv*(padv*(1-px)+(1-padv)*(1-pch+pch*p1))^(-1)
++n_2_0*padv*(padv*px+(1-padv)*pch*p0)^(-1)
+-n_2_1*padv*(padv*(1-px)+(1-padv)*pch*p1)^(-1)
++n_3_0*padv*(padv*px+(1-padv)*pch*p0)^(-1)
+-n_3_1*padv*(padv*(1-px)+(1-padv)*pch*p1)^(-1)
+ 
+l_dot[i] 0.0200682
+
+
+
+****************padv
+5  l_dot[i] 
+
+n_0_0*(px-(1-pch+pch*p0))*(padv*px+(1-padv)*(1-pch+pch*p0))^(-1)
+-n_0_2*(1-padv)^(-1)
+-n_0_3*(1-padv)^(-1)
++n_1_0*(px-pch*p0)*(padv*px+(1-padv)*pch*p0)^(-1)
++n_1_1*(1-px-(1-pch+pch*p1))*(padv*(1-px)+(1-padv)*(1-pch+pch*p1))^(-1)
+-n_1_2*(1-padv)^(-1)
+-n_1_3*(1-padv)^(-1)
++n_2_0*(px-pch*p0)*(padv*px+(1-padv)*pch*p0)^(-1)
++n_2_1*(1-px-pch*p1)*(padv*(1-px)+(1-padv)*pch*p1)^(-1)
+-n_2_2*(1-padv)^(-1)
+-n_2_3*(1-padv)^(-1)
++n_3_0*(px-pch*p0)*(padv*px+(1-padv)*pch*p0)^(-1)
++n_3_1*(1-px-pch*p1)*(padv*(1-px)+(1-padv)*pch*p1)^(-1)
+-n_3_2*(1-padv)^(-1)
+-n_3_3*(1-padv)^(-1)
+
+ l_dot[i] -0.127757
