@@ -36,6 +36,9 @@
     <ClCompile Include="mychisquare.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="nw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="HelperFunctions.h">

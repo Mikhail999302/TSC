@@ -836,8 +836,13 @@ MathCalc::MathString GroupedTSC::CTSCModel_1Pos_mine::SetEstimatesFormulasStrRep
 
 	strParamEstimates += _T("padv = (") + n_i_0_sum + _T("-(") + n_0_i_sum +
 		_T(")) / (n - (n_0_0+") + n_0_i_sum + _T("))") + GenerateRange() + _T(";\n");*/
-	strParamEstimates += _T("padv = (") + GetSumByRow(0, _dim) + _T(")/(n*((") + n_i_0_sum + _T(")/((") + n_i_0_sum + _T(")-(")
-		+ n_0_i_sum + _T(")))+(") + GetSumByRow(0, _dim) + _T(")-n);\n");
+	MathString sS0 = _T("(") + GetSumByRow(0, _dim) + _T(")");
+	MathString sA = _T("(") + n_i_0_sum + _T(")");
+	MathString sB = _T("(") + n_0_i_sum + _T(")");
+	MathString sDiff = _T("(") + sA + _T("-") + sB + _T(")");
+	MathString sNum = _T("(") + sS0 + _T("*") + sDiff + _T(")");
+	MathString sDen = _T("(") + sNum + _T("+n*") + sB + _T(")");
+	strParamEstimates += _T("padv = ") + sNum + _T("/") + sDen + _T(";\n");
 	//strParamEstimates += _T("padv = 1;\n");
 	return strParamEstimates;
 }

@@ -99,6 +99,7 @@
     <ClCompile Include="HelperFunctions.cpp" />
     <ClCompile Include="InfoMatrix.cpp" />
     <ClCompile Include="mychisquare.cpp" />
+    <ClCompile Include="nw.cpp" />
     <ClCompile Include="Tests.cpp" />
     <ClCompile Include="WideGenerator.cpp" />
   </ItemGroup>

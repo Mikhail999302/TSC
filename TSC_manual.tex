@@ -1,0 +1,333 @@
+% ============================================================================
+%  TSC_manual.tex  --  краткая инструкция (4-5 страниц)
+%  ФРАГМЕНТ: вставьте содержимое в свой отчёт.
+%
+%  Преамбула: \usepackage{amsmath} \usepackage{longtable}
+%             \usepackage[T2A]{fontenc} \usepackage[utf8]{inputenc}
+%             \usepackage[russian]{babel}
+%  (или XeLaTeX + fontspec вместо T2A/inputenc)
+% ============================================================================
+
+\section{Программная реализация численного эксперимента}
+
+Программа проверяет наблюдённую таблицу сопряжённости $n_{ij}$ на согласие
+с моделью связи двух признаков (модель двухшагового опроса, TSC), оценивает
+параметры переходов, вычисляет статистику $\chi^2$ и $p$-value, а также
+исследует размер и мощность критерия методом Монте-Карло. Вся логика
+эксперимента собрана в файле \texttt{Console\textbackslash nw.cpp}
+(пространство имён \texttt{chi2test}); остальные проекты решения
+(\texttt{TSCGenerator}, \texttt{TSCCalc}) только вызываются.
+
+\subsection{Сборка и запуск}
+
+Решение --- \texttt{C:\textbackslash diploma\textbackslash 2012\textbackslash
+TSC\textbackslash Console\textbackslash Console.sln}; конфигурация
+\textbf{Debug}, платформа \textbf{x86 (Win32)}. Все DLL собираются в общую
+папку \texttt{TSC\textbackslash Debug}, поэтому \texttt{Console.exe} и
+\texttt{*.dll} должны лежать рядом. Из командной строки:
+
+\begin{verbatim}
+"%VSINSTALLDIR%MSBuild\Current\Bin\MSBuild.exe" ^
+  "C:\diploma\2012\TSC\Console\Console.vcxproj" ^
+  /p:Configuration=Debug /p:Platform=Win32 /v:minimal /nologo
+cd /d C:\diploma\2012\TSC\Debug
+Console.exe > result.txt
+\end{verbatim}
+
+В начале \texttt{run()} обязательны две строки:
+\texttt{setlocale(LC\_ALL, "C")} --- при локали ``Russian'' вычислитель
+обрывает десятичные числа на точке и все оценки TSC становятся нулевыми;
+\texttt{SetConsoleOutputCP(1251)} --- исходники в cp1251, консоль по
+умолчанию в OEM 866. Файл \texttt{nw.cpp} следует сохранять в cp1251 с
+переводами строк CRLF и без BOM.
+
+Рабочий каталог определяет, куда пишутся CSV-файлы и \texttt{dump.log};
+входной файл таблицы дополнительно ищется рядом с \texttt{Console.exe}.
+
+\subsection{Параметры эксперимента}
+
+Настройки задаются вручную в начале \texttt{run()} (строки 1025--1072);
+командной строки и файлов конфигурации программа не читает.
+
+\begin{center}
+\begin{tabular}{|p{3.4cm}|p{9.2cm}|}
+\hline
+\textbf{Параметр} & \textbf{Смысл} \\ \hline
+\hline
+\texttt{m}, \texttt{p} & число брендов (размер таблицы $m\times m$) и вектор
+  $p_i = P(\xi_1 = i)$, нормируется автоматически \\ \hline
+\texttt{p\_ch}, \texttt{p\_adv} & доля переходов к новому бренду и к
+  рекламируемому бренду $0$ \\ \hline
+\texttt{N}, \texttt{numTrials}, \texttt{fixedSeed} & объём выборки, число
+  повторений, воспроизводимость (зерно 12345) \\ \hline
+\texttt{alpha}, \texttt{alphas} & уровень значимости (один или список;
+  от него зависит только строка решения) \\ \hline
+\texttt{modelIsA}, \texttt{numUnknown} & модель А ($\texttt{true}$) или Б
+  ($\texttt{false}$); число неизвестных параметров $0$, $1$ или $2$ \\ \hline
+\texttt{modes} & перебор режимов таблицы \\ \hline
+\texttt{fileSamplePath}, \texttt{checkFileSample}, \texttt{onlyFileSample} &
+  файл с проверяемой таблицей, проверять её и завершаться после проверки \\ \hline
+\texttt{sanityCheck}, \texttt{g\_transposeSample} & пробная выборка для
+  проверки ориентации таблицы \\ \hline
+\texttt{runPowerStudy}, \texttt{onlyPowerStudy}, \texttt{ps*} & блок
+  исследования мощности по сетке $p_i$ \\ \hline
+\end{tabular}
+\end{center}
+
+Значения \texttt{numUnknown}: $0$ --- оба параметра известны (оценки не
+вычисляются); $1$ --- известен $p_{\mathrm{adv}}$, оценивается
+$p_{\mathrm{ch}}$; $2$ --- оба неизвестны, оценки берутся из TSC.
+Вектор $p_i$ всегда считается известным; для проверки файла он оценивается
+по суммам строк, и $df$ уменьшается дополнительно на $m-1$.
+
+\subsection{Формат входных данных}
+
+Проверяемая таблица --- текстовый файл: квадратная матрица $m$ строк по
+$m$ неотрицательных целых частот через пробел или табуляцию. Пример:
+
+\begin{verbatim}
+88 2 4
+3  1 0
+2  1 30
+\end{verbatim}
+
+Разбор выполняет \texttt{readCountsFile} (строка 810): он же проверяет
+квадратность и неотрицательность. Объём $N$ равен сумме всех ячеек.
+Первая строка соответствует $\xi_1$, её доля должна быть близка к $p_0$.
+
+
+\subsection{Модели и их вероятности}
+
+Функции \texttt{piModel1} (строка 138) и \texttt{piModel2} (строка 150)
+задают $\pi_{ij} = P(\xi_2 = j \mid \xi_1 = i)$.
+
+\textbf{Модель А} (реклама первой):
+\begin{equation}
+\pi_{ij} =
+\begin{cases}
+ p_{\mathrm{adv}} + (1-p_{\mathrm{adv}})(1-p_{\mathrm{ch}}
+   + p_{\mathrm{ch}} p_0), & i=j=0,\\
+ (1-p_{\mathrm{adv}})(1-p_{\mathrm{ch}} + p_{\mathrm{ch}} p_j), & i=j\ne 0,\\
+ p_{\mathrm{adv}} + (1-p_{\mathrm{adv}})p_{\mathrm{ch}} p_0, & j=0,\ i\ne 0,\\
+ (1-p_{\mathrm{adv}})p_{\mathrm{ch}} p_j, & i\ne j,\ j\ne 0 .
+\end{cases}
+\end{equation}
+
+\textbf{Модель Б} (лояльность первой):
+\begin{equation}
+\pi_{ij} =
+\begin{cases}
+ (1-p_{\mathrm{ch}}) + p_{\mathrm{ch}} p_{\mathrm{adv}}
+   + p_{\mathrm{ch}}(1-p_{\mathrm{adv}}) p_0, & i=j=0,\\
+ (1-p_{\mathrm{ch}}) + p_{\mathrm{ch}}(1-p_{\mathrm{adv}}) p_j, & i=j\ne 0,\\
+ p_{\mathrm{ch}} p_{\mathrm{adv}} + p_{\mathrm{ch}}(1-p_{\mathrm{adv}}) p_0,
+   & j=0,\ i\ne 0,\\
+ p_{\mathrm{ch}}(1-p_{\mathrm{adv}}) p_j, & i\ne j,\ j\ne 0 .
+\end{cases}
+\end{equation}
+
+Совместная вероятность ячейки: $P_{ij} = \pi_{ij} p_i$ (функция
+\texttt{jointProbs}, строка 165). Соответствие ``модель --- генератор ---
+модель оценок'': А --- \texttt{CGenerator\_1Pos} и
+\texttt{CTSCModel\_1Pos}; Б --- \texttt{CGenerator\_1Pos\_mine} и
+\texttt{CTSCModel\_1Pos\_mine}. Флаг \texttt{testIsA} выбирает модель
+оценок, \texttt{modelIsA} --- генератор данных.
+
+
+\subsection{Режимы таблицы и число степеней свободы}
+
+Ячейка информативна, если $i \ne 0$ и ($j = 0$ или $i = j$); проверка ---
+\texttt{isInformative} (строка 320). Остальные ячейки не содержат
+информации о параметрах и объединяются либо отбрасываются.
+
+\begin{center}
+\begin{tabular}{|c|p{6.4cm}|c|c|}
+\hline
+\textbf{mode} & \textbf{Описание} & \textbf{Ячеек} & \textbf{$df$} \\ \hline
+\hline
+$0$ & полная таблица $m\times m$ & $m^2$ & $m^2 - 1 - k$ \\ \hline
+$1$ & объединение неинформативных ячеек & $2(m-1)+1$ & $2m-2-k$ \\ \hline
+$2$ & отбрасывание неинформативных ячеек & $2(m-1)$ & $2m-3-k$ \\ \hline
+\end{tabular}
+\end{center}
+
+Здесь $k$ --- значение \texttt{numUnknown}. Формула реализована в
+\texttt{chiDf} (строка 330). Статистика критерия (функция
+\texttt{chiSquareStat}, строка 342):
+\begin{equation}
+X^2 = \sum_{i,j} \frac{\bigl(n_{ij} - N P_{ij}\bigr)^2}{N P_{ij}},
+\qquad p\text{-value} = P(\chi^2_{df} \ge X^2)
+ = Q\!\left(\tfrac{df}{2}, \tfrac{X^2}{2}\right),
+\end{equation}
+где $Q$ --- регуляризованная неполная гамма-функция, реализованная вручную
+(\texttt{gammaQ}, строка 113). Оценки не обрезаются в $[0,1]$: если какая-либо
+$p_i\pi_{ij} \le 0$ (\texttt{modelIsValid}, строка 534), $p$-value
+не определён и считается равным нулю, а доля таких случаев выводится
+отдельно.
+
+
+\subsection{Оценки параметров}
+
+\textbf{Простые оценки} (метод моментов, \texttt{estimateSimple}, строка
+389) используют две статистики таблицы:
+\begin{equation}
+P_{2,0} = \tfrac{1}{N}\textstyle\sum_i n_{i0} = P(\xi_2 = 0), \qquad
+Q = \tfrac{1}{N}\textstyle\sum_i n_{ii} = P(\xi_1 = \xi_2), \qquad
+S_2 = \textstyle\sum_k p_k^2 .
+\end{equation}
+При $k = 1$ ($p_{\mathrm{adv}}$ известно) $p_{\mathrm{ch}}$ находится из
+$Q$: модель А ---
+$p_{\mathrm{ch}} = \dfrac{p_0 p_{\mathrm{adv}} + (1-p_{\mathrm{adv}}) - Q}
+{(1-p_{\mathrm{adv}})(1-S_2)}$, модель Б ---
+$p_{\mathrm{ch}} = \dfrac{1-Q}{1 - p_{\mathrm{adv}}p_0 - (1-p_{\mathrm{adv}})S_2}$.
+При $k = 2$ сначала из $P_{2,0}$ находится $p_{\mathrm{adv}}$:
+модель А --- $\frac{P_{2,0}-p_0}{1-p_0}$, затем $p_{\mathrm{ch}}$ по той же
+формуле; модель Б --- $x = \frac{P_{2,0}-p_0}{1-p_0} = p_{\mathrm{ch}}p_{\mathrm{adv}}$,
+затем $p_{\mathrm{ch}} = \frac{1-Q + x(p_0-S_2)}{1-S_2}$ и
+$p_{\mathrm{adv}} = \frac{x}{p_{\mathrm{ch}}}$.
+
+\textbf{Одношаговые оценки} (\texttt{oneStepUpdate}, строка 440) --- один
+шаг метода Фишера от простой оценки, без изменения $p_i$; производные берутся
+численно с шагом $10^{-5}$:
+\begin{equation}
+U_r = \sum_{i,j} \frac{n_{ij}}{\pi_{ij}}
+        \frac{\partial \pi_{ij}}{\partial \theta_r}, \qquad
+I_{rs} = \sum_{i,j} \frac{N p_i}{\pi_{ij}}
+        \frac{\partial \pi_{ij}}{\partial \theta_r}
+        \frac{\partial \pi_{ij}}{\partial \theta_s}, \qquad
+\hat\theta = \hat\theta^{(0)} + I^{-1} U .
+\end{equation}
+
+\textbf{Оценки TSC} (\texttt{readTscEstimates}, строка 226) используются при
+$k = 2$: модель TSC вызывает \texttt{ProcessInitialCalculation(true)}
+(простые оценки) и \texttt{ProcessEstimatesCalculation} (одношаговые).
+Вектор оценок имеет длину $m+1$ и порядок
+$[\hat\pi_0,\dots,\hat\pi_{m-2},\hat p_{\mathrm{ch}},\hat p_{\mathrm{adv}}]$,
+то есть $\hat p_{\mathrm{ch}}$ стоит на месте $m-1$, а
+$\hat p_{\mathrm{adv}}$ --- на месте $m$; при первом запуске индексы
+проверяются печатью всех оценок с именами. Для готовой таблицы оценки
+получаются функцией \texttt{tscEstimateAll} (строка 861) и разбираются
+функцией \texttt{paramsFromTsc} (строка 899). В
+\texttt{CTSCModel\_1Pos\_mine} формула $p_{\mathrm{adv}}$ переписана в
+устойчивом виде $S_0(A-B)/\bigl(S_0(A-B)+nB\bigr)$ вместо
+$S_0/\bigl(nA/(A-B)+S_0-n\bigr)$, которая давала исключение
+``Can't calculate simple estimates'' примерно в $2{,}8\,\%$ случаев.
+
+
+\subsection{Ход эксперимента}
+
+\begin{enumerate}
+  \item настройки, нормировка $p$, инициализация генератора (строки
+        1025--1082);
+  \item пробная выборка при \texttt{sanityCheck = true}
+        (\texttt{sanityCheckTsc}, строка 759): доли по строкам должны
+        совпадать с $p$, доли по столбцам --- нет; иначе включается
+        \texttt{g\_transposeSample};
+  \item проверка своей таблицы (\texttt{fileSampleCriterion}, строка 909):
+        печать таблицы, сумм строк, оценок TSC, $\chi^2$, $df$ и
+        $p$-value по всем режимам; от $\alpha$ зависит только строка
+        решения, поэтому достаточно одного значения \texttt{alphas};
+  \item печать ожидаемых частот $N p_{ij}$ и числа ячеек с $N p_{ij} < 5$
+        --- признак применимости критерия;
+  \item основной цикл по \texttt{modes}: размер и мощность при полностью
+        известных параметрах (\texttt{empiricalRejectionRate}, строка 370);
+        $p$-value при верной $H_0$ и оценённых параметрах
+        (\texttt{collectPValuesEstimated}, строка 541) с выгрузкой в CSV;
+        мощность против альтернативной модели
+        (\texttt{collectPValuesCrossModel}, строка 587).
+\end{enumerate}
+
+Все результаты печатаются в \texttt{std::cout} и дополнительно пишутся в
+файлы \texttt{pvalues\_simple\_mode*.csv},
+\texttt{pvalues\_onestep\_mode*.csv} и \texttt{power\_vs\_p.csv} (последний
+содержит \texttt{mode}, \texttt{p}, \texttt{size}, \texttt{power},
+\texttt{power\_calibrated}, \texttt{min\_expected}). В
+\texttt{power\_calibrated} порог заменён эмпирической $\alpha$-квантилью
+$p$-value при $H_0$, то есть это мощность при реальном размере критерия.
+Погрешность доли отвержений равна $\sqrt{\alpha(1-\alpha)/n}$: при
+$\alpha = 0.05$ и $n = 1000$ это $\approx 0.007$.
+
+\subsection{Задание распределения}
+
+Функция \texttt{makeDistrib} (строка 195) формирует для генераторов TSC
+плоский вектор $[\, p_0,\ p_1,\ \dots,\ p_{m-1},\ p_{\mathrm{ch}},\
+p_{\mathrm{adv}}\,]$. Он разбирается ``с конца'': последний элемент ---
+$p_{\mathrm{adv}}$, предпоследний --- $p_{\mathrm{ch}}$; последнее
+$p_{m-1}$ в \texttt{InitModel} не хранится, а восстанавливается как
+$1 - \sum_{i<m-1} p_i$. Поэтому достаточно отредактировать строки
+1026--1031:
+\begin{verbatim}
+Params par;
+par.m = 3;
+par.p_ch = 0.2;  par.p_adv = 0.05;
+par.p.clear();
+par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);
+\end{verbatim}
+Длина вектора $p$ должна совпадать с \texttt{par.m}. Признак $\xi_1$ имеет
+дискретное распределение $p_i$, реализованное методом Ченя
+(\texttt{CChenUFDD}, \texttt{distribution.h}); зерно генератора берётся из
+\texttt{std::mt19937} (\texttt{nextSeed}, строка 301), чтобы соседние
+выборки не совпадали. Логика одной выборки (модель А,
+\texttt{Generator.cpp}, \texttt{GenerateOne}): сначала рисуется
+$\xi_1 \sim p_i$, затем с вероятностью $p_{\mathrm{adv}}$ респондент
+переходит к бренду $0$, с вероятностью $p_{\mathrm{ch}}$ --- к новому
+бренду, иначе остаётся. Для модели Б порядок проверок обратный: сначала
+лояльность с вероятностью $1 - p_{\mathrm{ch}}$.
+
+
+\subsection{Добавление новой модели}
+
+\begin{enumerate}
+  \item \textbf{Генератор} (\texttt{TSCGenerator}): класс, наследующий
+        \texttt{CGenerator\_1Pos}, с методами \texttt{InitModel} (разбор
+        вектора распределения, создание \texttt{CChenUFDD}) и
+        \texttt{GenerateOne} (переход одного респондента) --- скопируйте
+        \texttt{CGenerator\_1Pos\_mine}.
+  \item \textbf{Символьное представление}: класс
+        \texttt{CTSCModelGenerator\_*} в
+        \texttt{TSCModelGenerator.h/.cpp} строит \texttt{TModelManager} ---
+        таблицу выражений $p[i][j]$ для вычислителя.
+  \item \textbf{Модель оценок} (\texttt{TSCCalc}): класс, наследующий
+        \texttt{CTSCModel}, с методами \texttt{SetSimpleEstimates},
+        \texttt{SetEstimatesFormulasStrRep}, \texttt{FixSimpleEstimates},
+        \texttt{CreateModelManager} и \texttt{Clone}. В формулах доступны
+        обозначения \texttt{n}, \texttt{n\_i\_j}, \texttt{p[i][j]},
+        \texttt{rowsum\_i} и \texttt{\$} (область значений параметра);
+        примеры --- в файлах \texttt{FORMULAS FOR SIMPLE ESTIMATES.txt}
+        и \texttt{Formulas for p[i][j]\_2NegPos.txt}.
+  \item \textbf{Подключение в \texttt{nw.cpp}}: заменить флаг
+        \texttt{bool modelIsA} номером модели в \texttt{piModel} (строка
+        161), в выборе модели TSC внутри \texttt{tscRun} (строка 275) и
+        генератора в \texttt{drawTrial} (строка 513). Функции
+        \texttt{jointProbs}, \texttt{chiSquareStat} и
+        \texttt{modelIsValid} подхватят новую модель автоматически;
+        отдельно правятся только собственные оценки (строки 414--431) и
+        блок \texttt{powerVsP}, где данные порождаются моделью А.
+  \item \textbf{Проверка}: \texttt{sanityCheck = true} (доли по строкам
+        равны $p$), затем при больших $N$ оценки сходятся к истинным
+        значениям, а размер критерия --- к номинальному уровню.
+\end{enumerate}
+
+
+\subsection{Пример вывода}
+
+Таблица $10 \times 10$ из файла \texttt{DES95765Group.txt}
+($N = 205$), модель А, \texttt{numUnknown = 2}:
+
+\begin{verbatim}
+Оценки TSC (простая / одношаговая):
+  p0 = 0.4829 / 0.4829    p1 = 0.0195 / 0.0262    p2 = 0.1756 / 0.1752
+  p3 = 0.0195 / 0.0192    p4 = 0.0244 / 0.0194    p5 = 0.0244 / 0.0338
+  p6 = 0.0341 / 0.0308    p7 = 0.0293 / 0.0306    p8 = 0.1024 / 0.1080
+  pch = 0.3821 / 0.2884   padv = 0.0472 / 0.0229
+
+Режим: полная таблица, df = 88 (p_i тоже оценены по таблице)
+  simple   chi2 = 106.2865, p-value = 0.089716 -> не отвергаем H0
+  one-step chi2 = 127.0932, p-value = 0.004074 ->  отвергаем H0
+  (если p_i считать известными, df = 97: simple = 0.244, one-step = 0.022)
+Режим: объединение, df = 7: simple = 0.012301, one-step = 0.011744
+\end{verbatim}
+
+Значения $p_0, p_1, \dots$ совпадают с долями строк ($99/205 = 0.4829$ и
+т.\,д.), что подтверждает корректность ориентации таблицы и разбора вектора
+оценок TSC.
