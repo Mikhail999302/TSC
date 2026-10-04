@@ -1028,21 +1028,24 @@ namespace chi2test {
         par.p_ch = 0.2;
         par.p_adv = 0.05;
         par.p.clear();
+        //par.p.resize(3);
+        /*for (int i = 0; i < 25; ++i)
+            par.p[i] = 0.04;*/
         par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // p_i ИЗВЕСТНЫ
         int N = 300;                 // объем одной выборки
         int numTrials = 1000;         // число повторений
         double alpha = 0.1;           // для блока "известные параметры"
         bool modelIsA = true;         // true: данные и H0 - модель А; false: модель Б
-        int numUnknown = 2;           // 0: все известны; 1: неизвестен p_ch; 2: p_ch и p_adv (оценки TSC)
-        int numUnknownAlt = 2;        // то же для блока мощности (0, 1 или 2; 2 бесполезно)
+        int numUnknown = 1;           // 0: все известны; 1: неизвестен p_ch; 2: p_ch и p_adv (оценки TSC)
+        int numUnknownAlt = 1;        // то же для блока мощности (0, 1 или 2; 2 бесполезно)
         bool fixedSeed = false;        // true: воспроизводимый результат
         bool sanityCheck = false;      // напечатать пробные выборки TSC для проверки ориентации таблицы
         g_transposeSample = false;    // true, если в таблице TSC строка = xi_2
         std::vector<int> modes;
         modes.push_back(0); modes.push_back(1);// modes.push_back(2);
         // --- проверка своей выборки из файла ---
-        bool checkFileSample = true;          // true: проверить таблицу из файла
-        bool onlyFileSample = true;          // true: после проверки файла не гонять моделирование
+        bool checkFileSample = false;          // true: проверить таблицу из файла
+        bool onlyFileSample = false;          // true: после проверки файла не гонять моделирование
         std::string fileSamplePath = "DES95765Group.txt";   // файл с таблицей m x m (частоты через пробел)
         vector<double> alphas = { 0.01, 0.02, 0.03, 0.04, 0.05, 0.1 };
         // --- Исследование мощности в зависимости от p_i ---
