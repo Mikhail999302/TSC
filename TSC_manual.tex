@@ -11,12 +11,12 @@
 \section{Программная реализация численного эксперимента}
 
 Программа проверяет наблюдённую таблицу сопряжённости $n_{ij}$ на согласие
-с моделью связи двух признаков (модель двухшагового опроса, TSC), оценивает
-параметры переходов, вычисляет статистику $\chi^2$ и $p$-value, а также
-исследует размер и мощность критерия методом Монте-Карло. Вся логика
-эксперимента собрана в файле \texttt{Console\textbackslash nw.cpp}
-(пространство имён \texttt{chi2test}); остальные проекты решения
-(\texttt{TSCGenerator}, \texttt{TSCCalc}) только вызываются.
+с моделью двухшагового опроса (TSC), оценивает параметры переходов,
+вычисляет статистику $\chi^2$ и $p$-value и исследует размер и мощность
+критерия методом Монте-Карло. Логика эксперимента собрана в файле
+\texttt{Console\textbackslash nw.cpp} (пространство имён \texttt{chi2test}),
+а проекты \texttt{TSCPlevel}, \texttt{Libs}, \texttt{TSCGenerator} и
+\texttt{TSCCalc} только вызываются.
 
 \subsection{Сборка и запуск}
 
@@ -46,7 +46,7 @@ Console.exe > result.txt
 
 \subsection{Параметры эксперимента}
 
-Настройки задаются вручную в начале \texttt{run()} (строки 1025--1072);
+Настройки задаются вручную в начале \texttt{run()} (строки 1046--1095);
 командной строки и файлов конфигурации программа не читает.
 
 \begin{center}
@@ -91,14 +91,14 @@ $m$ неотрицательных целых частот через пробе
 2  1 30
 \end{verbatim}
 
-Разбор выполняет \texttt{readCountsFile} (строка 810): он же проверяет
+Разбор выполняет \texttt{readCountsFile} (строка 821): он же проверяет
 квадратность и неотрицательность. Объём $N$ равен сумме всех ячеек.
 Первая строка соответствует $\xi_1$, её доля должна быть близка к $p_0$.
 
 
 \subsection{Модели и их вероятности}
 
-Функции \texttt{piModel1} (строка 138) и \texttt{piModel2} (строка 150)
+Функции \texttt{piModel1} (строка 78) и \texttt{piModel2} (строка 90)
 задают $\pi_{ij} = P(\xi_2 = j \mid \xi_1 = i)$.
 
 \textbf{Модель А} (реклама первой):
@@ -127,7 +127,7 @@ $m$ неотрицательных целых частот через пробе
 \end{equation}
 
 Совместная вероятность ячейки: $P_{ij} = \pi_{ij} p_i$ (функция
-\texttt{jointProbs}, строка 165). Соответствие ``модель --- генератор ---
+\texttt{jointProbs}, строка 105). Соответствие ``модель --- генератор ---
 модель оценок'': А --- \texttt{CGenerator\_1Pos} и
 \texttt{CTSCModel\_1Pos}; Б --- \texttt{CGenerator\_1Pos\_mine} и
 \texttt{CTSCModel\_1Pos\_mine}. Флаг \texttt{testIsA} выбирает модель
@@ -137,7 +137,7 @@ $m$ неотрицательных целых частот через пробе
 \subsection{Режимы таблицы и число степеней свободы}
 
 Ячейка информативна, если $i \ne 0$ и ($j = 0$ или $i = j$); проверка ---
-\texttt{isInformative} (строка 320). Остальные ячейки не содержат
+\texttt{isInformative} (строка 260). Остальные ячейки не содержат
 информации о параметрах и объединяются либо отбрасываются.
 
 \begin{center}
@@ -152,24 +152,37 @@ $2$ & отбрасывание неинформативных ячеек & $2(m-
 \end{center}
 
 Здесь $k$ --- значение \texttt{numUnknown}. Формула реализована в
-\texttt{chiDf} (строка 330). Статистика критерия (функция
-\texttt{chiSquareStat}, строка 342):
+\texttt{chiDf} (строка 296). Статистика и $p$-value считаются библиотекой
+(функция \texttt{chiSquare}, строка 325, через
+\texttt{PLevel::CPLevel} из проекта \texttt{TSCPlevel}):
 \begin{equation}
-X^2 = \sum_{i,j} \frac{\bigl(n_{ij} - N P_{ij}\bigr)^2}{N P_{ij}},
+X^2 = \sum_{g} \frac{\bigl(n_{g} - N P_{g}\bigr)^2}{N P_{g}},
 \qquad p\text{-value} = P(\chi^2_{df} \ge X^2)
- = Q\!\left(\tfrac{df}{2}, \tfrac{X^2}{2}\right),
+  = 1 - \mathtt{pChi}\bigl(X^2, df\bigr),
 \end{equation}
-где $Q$ --- регуляризованная неполная гамма-функция, реализованная вручную
-(\texttt{gammaQ}, строка 113). Оценки не обрезаются в $[0,1]$: если какая-либо
-$p_i\pi_{ij} \le 0$ (\texttt{modelIsValid}, строка 534), $p$-value
-не определён и считается равным нулю, а доля таких случаев выводится
-отдельно.
+где $g$ --- группы ячеек, заданные стратегией группировки, а
+\texttt{pChi} --- функция распределения хи-квадрат из
+\texttt{TSCPlevel\string\PROBDIST.CPP} (она возвращает CDF, поэтому
+$p$-value --- это $1-\mathtt{pChi}$; при $df>40$ используется приближение
+Уилсона--Хилферти, так что $p$-value в этом диапазоне отличается от точного
+на десятые доли процента). Режимы $0$ и $2$ используют
+\texttt{Tsc::Grouping::NoneGroup} (в режиме $2$ неинформативные ячейки в
+библиотеку не передаются), режим $1$ --- класс \texttt{MergeNonInformative}
+(строка 270), наследник \texttt{Tsc::Grouping::IMergeGrouping}: каждая
+информативная ячейка образует свою группу, все остальные попадают в
+группу $0$. Степени свободы передаются в \texttt{CalcChiValue} явно, поэтому
+библиотечная проверка ``$df = \text{число групп} - 1$'' не используется.
+Оценки не обрезаются в $[0,1]$: если какая-либо $p_i\pi_{ij} \le 0$
+(\texttt{modelIsValid}, строка 537) или $N P_{g} \le 0$, $p$-value равен
+нулю, а доля таких случаев выводится отдельно. Перед расчётом вызывается
+\texttt{initDumper()}: \texttt{CPLevel} пишет отладочные сообщения через
+\texttt{Dumper}.
 
 
 \subsection{Оценки параметров}
 
 \textbf{Простые оценки} (метод моментов, \texttt{estimateSimple}, строка
-389) используют две статистики таблицы:
+392) используют две статистики таблицы:
 \begin{equation}
 P_{2,0} = \tfrac{1}{N}\textstyle\sum_i n_{i0} = P(\xi_2 = 0), \qquad
 Q = \tfrac{1}{N}\textstyle\sum_i n_{ii} = P(\xi_1 = \xi_2), \qquad
@@ -186,7 +199,7 @@ $p_{\mathrm{ch}} = \dfrac{1-Q}{1 - p_{\mathrm{adv}}p_0 - (1-p_{\mathrm{adv}})S_2
 затем $p_{\mathrm{ch}} = \frac{1-Q + x(p_0-S_2)}{1-S_2}$ и
 $p_{\mathrm{adv}} = \frac{x}{p_{\mathrm{ch}}}$.
 
-\textbf{Одношаговые оценки} (\texttt{oneStepUpdate}, строка 440) --- один
+\textbf{Одношаговые оценки} (\texttt{oneStepUpdate}, строка 443) --- один
 шаг метода Фишера от простой оценки, без изменения $p_i$; производные берутся
 численно с шагом $10^{-5}$:
 \begin{equation}
@@ -198,7 +211,7 @@ I_{rs} = \sum_{i,j} \frac{N p_i}{\pi_{ij}}
 \hat\theta = \hat\theta^{(0)} + I^{-1} U .
 \end{equation}
 
-\textbf{Оценки TSC} (\texttt{readTscEstimates}, строка 226) используются при
+\textbf{Оценки TSC} (\texttt{readTscEstimates}, строка 166) используются при
 $k = 2$: модель TSC вызывает \texttt{ProcessInitialCalculation(true)}
 (простые оценки) и \texttt{ProcessEstimatesCalculation} (одношаговые).
 Вектор оценок имеет длину $m+1$ и порядок
@@ -206,8 +219,8 @@ $[\hat\pi_0,\dots,\hat\pi_{m-2},\hat p_{\mathrm{ch}},\hat p_{\mathrm{adv}}]$,
 то есть $\hat p_{\mathrm{ch}}$ стоит на месте $m-1$, а
 $\hat p_{\mathrm{adv}}$ --- на месте $m$; при первом запуске индексы
 проверяются печатью всех оценок с именами. Для готовой таблицы оценки
-получаются функцией \texttt{tscEstimateAll} (строка 861) и разбираются
-функцией \texttt{paramsFromTsc} (строка 899). В
+получаются функцией \texttt{tscEstimateAll} (строка 872) и разбираются
+функцией \texttt{paramsFromTsc} (строка 910). В
 \texttt{CTSCModel\_1Pos\_mine} формула $p_{\mathrm{adv}}$ переписана в
 устойчивом виде $S_0(A-B)/\bigl(S_0(A-B)+nB\bigr)$ вместо
 $S_0/\bigl(nA/(A-B)+S_0-n\bigr)$, которая давала исключение
@@ -218,23 +231,23 @@ $S_0/\bigl(nA/(A-B)+S_0-n\bigr)$, которая давала исключени
 
 \begin{enumerate}
   \item настройки, нормировка $p$, инициализация генератора (строки
-        1025--1082);
+        1046--1103);
   \item пробная выборка при \texttt{sanityCheck = true}
-        (\texttt{sanityCheckTsc}, строка 759): доли по строкам должны
+        (\texttt{sanityCheckTsc}, строка 774): доли по строкам должны
         совпадать с $p$, доли по столбцам --- нет; иначе включается
         \texttt{g\_transposeSample};
-  \item проверка своей таблицы (\texttt{fileSampleCriterion}, строка 909):
+  \item проверка своей таблицы (\texttt{fileSampleCriterion}, строка 920):
         печать таблицы, сумм строк, оценок TSC, $\chi^2$, $df$ и
         $p$-value по всем режимам; от $\alpha$ зависит только строка
         решения, поэтому достаточно одного значения \texttt{alphas};
   \item печать ожидаемых частот $N p_{ij}$ и числа ячеек с $N p_{ij} < 5$
         --- признак применимости критерия;
   \item основной цикл по \texttt{modes}: размер и мощность при полностью
-        известных параметрах (\texttt{empiricalRejectionRate}, строка 370);
+        известных параметрах (\texttt{empiricalRejectionRate}, строка 371);
         $p$-value при верной $H_0$ и оценённых параметрах
-        (\texttt{collectPValuesEstimated}, строка 541) с выгрузкой в CSV;
+        (\texttt{collectPValuesEstimated}, строка 544) с выгрузкой в CSV;
         мощность против альтернативной модели
-        (\texttt{collectPValuesCrossModel}, строка 587).
+        (\texttt{collectPValuesCrossModel}, строка 596).
 \end{enumerate}
 
 Все результаты печатаются в \texttt{std::cout} и дополнительно пишутся в
@@ -249,13 +262,13 @@ $\alpha = 0.05$ и $n = 1000$ это $\approx 0.007$.
 
 \subsection{Задание распределения}
 
-Функция \texttt{makeDistrib} (строка 195) формирует для генераторов TSC
+Функция \texttt{makeDistrib} (строка 135) формирует для генераторов TSC
 плоский вектор $[\, p_0,\ p_1,\ \dots,\ p_{m-1},\ p_{\mathrm{ch}},\
 p_{\mathrm{adv}}\,]$. Он разбирается ``с конца'': последний элемент ---
 $p_{\mathrm{adv}}$, предпоследний --- $p_{\mathrm{ch}}$; последнее
 $p_{m-1}$ в \texttt{InitModel} не хранится, а восстанавливается как
 $1 - \sum_{i<m-1} p_i$. Поэтому достаточно отредактировать строки
-1026--1031:
+1047--1055:
 \begin{verbatim}
 Params par;
 par.m = 3;
@@ -266,7 +279,7 @@ par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);
 Длина вектора $p$ должна совпадать с \texttt{par.m}. Признак $\xi_1$ имеет
 дискретное распределение $p_i$, реализованное методом Ченя
 (\texttt{CChenUFDD}, \texttt{distribution.h}); зерно генератора берётся из
-\texttt{std::mt19937} (\texttt{nextSeed}, строка 301), чтобы соседние
+\texttt{std::mt19937} (\texttt{nextSeed}, строка 241), чтобы соседние
 выборки не совпадали. Логика одной выборки (модель А,
 \texttt{Generator.cpp}, \texttt{GenerateOne}): сначала рисуется
 $\xi_1 \sim p_i$, затем с вероятностью $p_{\mathrm{adv}}$ респондент
@@ -290,19 +303,20 @@ $\xi_1 \sim p_i$, затем с вероятностью $p_{\mathrm{adv}}$ ре
   \item \textbf{Модель оценок} (\texttt{TSCCalc}): класс, наследующий
         \texttt{CTSCModel}, с методами \texttt{SetSimpleEstimates},
         \texttt{SetEstimatesFormulasStrRep}, \texttt{FixSimpleEstimates},
-        \texttt{CreateModelManager} и \texttt{Clone}. В формулах доступны
+        \texttt{CreateModelManager} и \texttt{Clone}; в формулах доступны
         обозначения \texttt{n}, \texttt{n\_i\_j}, \texttt{p[i][j]},
-        \texttt{rowsum\_i} и \texttt{\$} (область значений параметра);
-        примеры --- в файлах \texttt{FORMULAS FOR SIMPLE ESTIMATES.txt}
-        и \texttt{Formulas for p[i][j]\_2NegPos.txt}.
+        \texttt{rowsum\_i} и \texttt{\$} (область значений параметра), примеры ---
+        в файлах \texttt{FORMULAS FOR SIMPLE ESTIMATES.txt} и
+        \texttt{Formulas for p[i][j]\_2NegPos.txt}.
   \item \textbf{Подключение в \texttt{nw.cpp}}: заменить флаг
         \texttt{bool modelIsA} номером модели в \texttt{piModel} (строка
-        161), в выборе модели TSC внутри \texttt{tscRun} (строка 275) и
-        генератора в \texttt{drawTrial} (строка 513). Функции
-        \texttt{jointProbs}, \texttt{chiSquareStat} и
+        101), в выборе модели TSC внутри \texttt{tscRun} (строка 198) и
+        генератора в \texttt{drawTrial} (строка 507). Функции
+        \texttt{jointProbs}, \texttt{chiSquare} и
         \texttt{modelIsValid} подхватят новую модель автоматически;
-        отдельно правятся только собственные оценки (строки 414--431) и
-        блок \texttt{powerVsP}, где данные порождаются моделью А.
+        отдельно правятся только собственные оценки (строки 392--442) и
+        блок \texttt{powerVsP} (строка 701), где данные порождаются
+        моделью А.
   \item \textbf{Проверка}: \texttt{sanityCheck = true} (доли по строкам
         равны $p$), затем при больших $N$ оценки сходятся к истинным
         значениям, а размер критерия --- к номинальному уровню.
@@ -322,12 +336,11 @@ $\xi_1 \sim p_i$, затем с вероятностью $p_{\mathrm{adv}}$ ре
   pch = 0.3821 / 0.2884   padv = 0.0472 / 0.0229
 
 Режим: полная таблица, df = 88 (p_i тоже оценены по таблице)
-  simple   chi2 = 106.2865, p-value = 0.089716 -> не отвергаем H0
-  one-step chi2 = 127.0932, p-value = 0.004074 ->  отвергаем H0
-  (если p_i считать известными, df = 97: simple = 0.244, one-step = 0.022)
+  simple   chi2 = 106.2865, p-value = 0.089658 -> не отвергаем H0
+  one-step chi2 = 127.0932, p-value = 0.004094 ->  отвергаем H0
 Режим: объединение, df = 7: simple = 0.012301, one-step = 0.011744
 \end{verbatim}
 
-Значения $p_0, p_1, \dots$ совпадают с долями строк ($99/205 = 0.4829$ и
-т.\,д.), что подтверждает корректность ориентации таблицы и разбора вектора
-оценок TSC.
+Значения $p_0, p_1, \dots$ совпадают с долями строк ($99/205 = 0.4829$):
+ориентация таблицы и разбор оценок TSC корректны. При известных $p_i$
+($df = 97$) $p$-value равны $0.244$ и $0.022$.
