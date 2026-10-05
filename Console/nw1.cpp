@@ -54,12 +54,34 @@ namespace chi2test {
     };
 
     struct Est {
+        std::vector<double> p;  // p_i = P(xi_1 = i), p[m-1] = 1 - sum(p_i)
         double p_ch;
         double p_adv;
-        bool outside;  // true, если хотя бы одна оценка вне [0, 1]
+        bool outside;  // true, .... .... .. .... ...... ... [0, 1]
     };
 
     static bool outside01(double v) { return v < 0.0 || v > 1.0; }
+
+    static bool outsideEst(const Est& e)
+    {
+        bool bad = outside01(e.p_ch) || outside01(e.p_adv);
+        for (size_t i = 0; i + 1 < e.p.size(); ++i)
+            if (outside01(e.p[i])) bad = true;
+        return bad;
+    }
+    // ..... ...... TSC -> .........: [p_0 ... p_{m-2}, p_ch, p_adv].
+    // ... ... ..... ... . p_i (p_{m-1} = 1 - sum), p_ch . p_adv.
+    static void estFromTsc(const std::vector<double>& all, int m, Est& e)
+    {
+        if (static_cast<int>(all.size()) < m + 1) { e.outside = true; return; }
+        e.p.assign(m, 0.0);
+        double sum = 0.0;
+        for (int i = 0; i + 1 < m; ++i) { e.p[i] = all[i]; sum += all[i]; }
+        e.p[m - 1] = 1.0 - sum;
+        e.p_ch = all[m - 1];
+        e.p_adv = all[m];
+        e.outside = outsideEst(e);
+    }
 
     // true, если категории TSC заданы наоборот (xi_2 = xi_1)
     static bool g_transposeSample = false;
@@ -122,11 +144,6 @@ namespace chi2test {
                 // Кэшеры строят символические выражения l_dot и InfoMatrix
                 // при первом обращении, поэтому начальные значения в карте
                 // должны быть корректными.
-                for (int i = 0; i + 1 < m; ++i)
-                    MathCalc::MathContext::SetParameterValue(paramName(i), 0.25);
-                MathCalc::MathContext::SetParameterValue(_T("pch"), 0.2);
-                MathCalc::MathContext::SetParameterValue(_T("padv"), 0.05);
-
                 m_paramInfos = MathModels::CMathParameterInfos(m_se);
 
                 static bool printedNames = false;
@@ -143,6 +160,22 @@ namespace chi2test {
                 m_model->Init(m_states, m_paramInfos, m_comp,
                     m_ldot, m_info, MathModels::CMathOperationIndicator(),
                     /*_isCalcInfoMatrix=*/true, /*_isBMatrix=*/false);
+                // Совпадение имён параметров с картой: перед первым расчётом
+                // библиотека строит символьные выражения (CalcSimpleEstimates)
+                // при первом обращении, поэтому начальные значения в карте
+                // по значениям из карты, поэтому значения в карте
+                // должны совпадать с теми, что передаются в оценку.
+                // CalcFrequencies -> SetContextValues().
+                {
+                    m_dummy.assign(static_cast<size_t>(m) * m, 1.0);
+                    m_dummyN = m * m;
+                    MathModels::CMathParameterValues est;
+                    if (!m_model->CalcSimpleEstimates(m_dummy, m_dummyN, m_se, est))
+                        throw std::runtime_error("TSC simple estimates failed");
+                    if (est.size() != n)
+                        throw std::runtime_error("TSC parameters count");
+                    est.SetContextValues();
+                }
             }
             catch (...) {
                 MathCalc::MathContext::RemoveMap(m_mapId);
@@ -159,24 +192,50 @@ namespace chi2test {
         }
 
         int dim() const { return m_m; }
+        // ... ... ... ....... df, ... TSCCalc (model.cpp:268):
+        //   df = GetStatesCount() - GetNANParametersCount() - 1
+        int libraryStatesCount() const { return m_model->GetStatesCount(); }
+        int libraryParamCount() const { return m_model->GetNANParametersCount(); }
 
         // p(xi_1 = i, xi_2 = j) = p_i * pi_ij, раскладка [i*m + j].
-        // Состояние p[i][j] в m_states соответствует частоте n_i_j, а
-        // CDiscrete2DModel::SetFrequenciesValues() читает Sample[i*m + j],
-        // поэтому индекс состояния совпадает с индексом ячейки.
-        std::vector<double> jointProbs(const std::vector<double>& p, double pCh, double pAdv)
+        // Теоретические вероятности состояний: CBaseDiscreteModel::CalcFrequencies
+        // (при n = 1 библиотека возвращает произведения p_i * pi_ij). Значения p_i и
+        // p_ch/p_adv передаются явно в CMathParameterValues, остальное берётся из выражений.
+        // p(xi_1 = i, xi_2 = j) = p_i * pi_ij, раскладка [i*m + j].
+        // Теоретические вероятности состояний: CBaseDiscreteModel::CalcFrequencies
+        // (при n = 1 библиотека возвращает произведения p_i * pi_ij).
+        // Первый аргумент counts нужен библиотеке только для построения оценок,
+        // значения параметров в CMathParameterValues задаются явно, поэтому
+        // итог от CalcSimpleEstimates не влияет на результат: частоты считает
+        // только CalcFrequencies по переданным значениям параметров.
+        // Пустые (нулевые) частоты для вероятностей не нужны, но длина должна совпадать.
+        bool jointProbs(const std::vector<double>& counts, int n,
+            const std::vector<double>& p, double pCh, double pAdv,
+            std::vector<double>& probs) const
         {
-            MathCalc::MathContext::SelectMap(m_mapId);
-            for (int i = 0; i + 1 < m_m && i < static_cast<int>(p.size()); ++i)
-                MathCalc::MathContext::SetParameterValue(paramName(i), p[i]);
-            MathCalc::MathContext::SetParameterValue(_T("pch"), pCh);
-            MathCalc::MathContext::SetParameterValue(_T("padv"), pAdv);
+            const size_t np = static_cast<size_t>(m_m) + 1;
+            if (p.size() < static_cast<size_t>(m_m) - 1) return false;
+            if (counts.size() != static_cast<size_t>(m_m) * m_m) return false;
 
-            std::vector<double> probs(static_cast<size_t>(m_m) * m_m, 0.0);
-            for (int i = 0; i < m_m; ++i)
-                for (int j = 0; j < m_m; ++j)
-                    probs[i * m_m + j] = m_states[i * m_m + j].Eval();
-            return probs;
+            MathCalc::MathContext::SelectMap(m_mapId);
+
+            MathModels::CMathParameterValues est;
+            if (!m_model->CalcSimpleEstimates(counts, n, m_se, est)) return false;
+            if (est.size() != np) return false;
+            for (int i = 0; i + 1 < m_m; ++i) est[i].Value = p[i];
+            est[m_m - 1].Value = pCh;
+            est[m_m].Value = pAdv;
+
+            probs.clear();
+            return m_model->CalcFrequencies(est, 1, probs);
+        }
+
+        // Версия без выборки: подставляет фиктивные counts (все единицы),
+        // потому что для вероятностей нужны только параметры, а не частоты ячеек.
+        bool jointProbs(const std::vector<double>& p, double pCh, double pAdv,
+            std::vector<double>& probs) const
+        {
+            return jointProbs(m_dummy, m_dummyN, p, pCh, pAdv, probs);
         }
 
         // Оценки библиотекой по таблице частот counts (раскладка [i*m + j]).
@@ -196,6 +255,8 @@ namespace chi2test {
 
             if (!m_model->CalcSimpleEstimates(counts, N, m_se, est)) return false;
             if (est.size() != n) return false;
+
+
             simple.assign(n, 0.0);
             for (size_t i = 0; i < n; ++i) simple[i] = est[i].Value;
 
@@ -209,35 +270,8 @@ namespace chi2test {
             return true;
         }
 
-        // Оценки только p_ch и p_adv (индексы m-1 и m в наборе оценок).
-        // Если p_adv известен, используется заданное значение.
-        bool estimateChAdv(const std::vector<double>& counts, int N, bool pAdvFixed,
-            double knownPAdv, Est& simple, Est& oneStep)
-        {
-            std::vector<double> sAll, oAll;
-            if (!estimates(counts, N, sAll, oAll)) return false;
-
-            const int iCh = m_m - 1, iAdv = m_m;
-
-            simple.p_ch = sAll[iCh];
-            simple.p_adv = pAdvFixed ? knownPAdv : sAll[iAdv];
-            simple.outside = outside01(simple.p_ch) || outside01(simple.p_adv);
-
-            oneStep.p_ch = oAll[iCh];
-            oneStep.p_adv = pAdvFixed ? knownPAdv : oAll[iAdv];
-            oneStep.outside = outside01(oneStep.p_ch) || outside01(oneStep.p_adv);
-
-            return true;
-        }
 
     private:
-        static MathCalc::MathString paramName(int i)
-        {
-            typedef MathCalc::MathString::value_type CharT;
-            std::basic_stringstream<CharT> os;
-            os << static_cast<CharT>('p') << i;
-            return os.str();
-        }
 
         int m_m;
         bool m_isA;
@@ -250,6 +284,8 @@ namespace chi2test {
         MathModels::TInfoCacher m_info;
         std::auto_ptr<GroupedTSC::IModelRep> m_rep;
         MathModels::CExpressions m_states;
+        std::vector<double> m_dummy;
+        int m_dummyN = 0;
         MathModels::CMathParameterEstimates m_se;
         MathModels::CMathParameterInfos m_paramInfos;
         MathModels::ModelPtr m_model;
@@ -270,9 +306,13 @@ namespace chi2test {
         return *slot;
     }
 
+    // Модель А или Б выбирается флагом; модель кэшируется и пересоздаётся
+    // только при смене m. Сами вероятности считает CalcFrequencies; результат - вектор m*m.
     static std::vector<double> jointProbs(const Params& par, bool model1)
     {
-        return theModel(par.m, model1).jointProbs(par.p, par.p_ch, par.p_adv);
+        std::vector<double> probs;
+        theModel(par.m, model1).jointProbs(par.p, par.p_ch, par.p_adv, probs);
+        return probs;
     }
 
     // ----------------------------------------------------------------------
@@ -363,29 +403,166 @@ namespace chi2test {
     }
 
     // ----------------------------------------------------------------------
-    // Оценки: только библиотека
+    // ......: ...... ..........
     // ----------------------------------------------------------------------
+    //   numUnknown == 0: ...... ... p_i (p_0..p_{m-2}); p_ch . p_adv ... ...
+    //   numUnknown == 1: ...... ... p_i . p_ch; p_adv ... ...
+    //   numUnknown == 2: ...... ... p_i, p_ch . p_adv
+    //   p_i ...... ... CalcSimpleEstimates / CalcEnhancedEstimates
+    //   (p_i MLE - . . . . .. .); p_ch . p_adv ... . .. . .. ..
+    // testPar - ......... ........... ...... .
+    // ----------------------------------------------------------------------
+    // ----------------------------------------------------------------------
+    // MLE of p_0..p_{m-2} with p_ch and p_adv known (numUnknown == 0).
+    //
+    // Model: q(i,k) = p_i * c(i,k), kernel
+    //     c(i,k) = a*p_k + b*[k==0] + d*[k==i]
+    // (a,b,d) = ((1-padv)*pch, padv, (1-padv)*(1-pch))  for model A,
+    //           (pch*(1-padv), pch*padv, 1-pch)          for model B.
+    //
+    // Row sums (CalcSimpleEstimates) are NOT the MLE here: the kernel depends on
+    // the same p, so p enters q twice.  With p_ch, p_adv fixed the log-likelihood
+    // is strictly concave in p, so  d(logL)/dp = 0  has one interior root, found by
+    // Newton's method (in p-coordinates the Hessian is diagonal, -H = diag(D) +
+    // D_{m-1}*11', inverted in closed form).
+    // ----------------------------------------------------------------------
+    struct KernelABC { double a, b, d; };
 
-    //   numUnknown == 0: ничего не оцениваем, параметры известны;
-    //   numUnknown == 1: p_adv известен, оценивается только p_ch;
-    //   numUnknown == 2: оцениваются оба параметра.
-    // testPar - параметры проверяемой модели (p_i известны).
+    static KernelABC kernelABC(bool model1, double p_ch, double p_adv)
+    {
+        KernelABC k;
+        if (model1) {
+            k.a = (1.0 - p_adv) * p_ch;
+            k.b = p_adv;
+            k.d = (1.0 - p_adv) * (1.0 - p_ch);
+        }
+        else {
+            k.a = p_ch * (1.0 - p_adv);
+            k.b = p_ch * p_adv;
+            k.d = 1.0 - p_ch;
+        }
+        return k;
+    }
+
+    static double logLik(const Counts& counts, const std::vector<double>& r, int m,
+        const KernelABC& k, const std::vector<double>& p)
+    {
+        double L = 0.0;
+        for (int i = 0; i < m; ++i) {
+            if (p[i] <= 0.0) return -1e300;
+            if (r[i] != 0) L += r[i] * std::log(p[i]);
+        }
+        for (int i = 0; i < m; ++i)
+            for (int l = 0; l < m; ++l) {
+                const double c = k.a * p[l] + (l == 0 ? k.b : 0.0) + (l == i ? k.d : 0.0);
+                if (c <= 0.0) return -1e300;
+                if (counts[i][l] != 0) L += counts[i][l] * std::log(c);
+            }
+        return L;
+    }
+
+    static bool newtonP(const Counts& counts, int N, int m, bool model1,
+        double p_ch, double p_adv, std::vector<double>& p, int maxIter)
+    {
+        if (static_cast<int>(p.size()) != m || m < 2) return false;
+        const KernelABC k = kernelABC(model1, p_ch, p_adv);
+        const int f = m - 1;
+        std::vector<double> r(m, 0.0), c(m * m), gp(m, 0.0), D(m, 0.0);
+        std::vector<double> g(f), w(f), dir(f), trial(m);
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < m; ++j) r[i] += counts[i][j];
+        for (int it = 0; it < maxIter; ++it) {
+            for (int i = 0; i < m; ++i)
+                for (int j = 0; j < m; ++j)
+                    c[i * m + j] = k.a * p[j] + (j == 0 ? k.b : 0.0) + (j == i ? k.d : 0.0);
+            bool bad = false;
+            for (int l = 0; l < m; ++l) {
+                const double cll = c[l * m + l];
+                if (p[l] <= 0.0 || cll <= 0.0) { bad = true; break; }
+                double t = 0.0;
+                for (int i = 0; i < m; ++i) t += counts[i][l] / c[i * m + l];
+                gp[l] = r[l] / p[l] + k.a * t;
+                D[l] = r[l] / (p[l] * p[l]) + k.a * k.a * counts[l][l] / (cll * cll);
+            }
+            if (bad) break;
+            double S = 0.0, wg = 0.0;
+            for (int t = 0; t < f; ++t) {
+                if (D[t] <= 0.0) { bad = true; break; }
+                g[t] = gp[t] - gp[m - 1];
+                w[t] = 1.0 / D[t];
+                S += w[t];
+                wg += w[t] * g[t];
+            }
+            if (bad) break;
+            // Newton:  p <- p + (-H)^-1 * g,   -H = diag(D[0..f-1]) + D[m-1]*11'
+            const double den = 1.0 + D[m - 1] * S;
+            if (den <= 0.0) break;
+            const double c0 = D[m - 1] / den;
+            for (int t = 0; t < f; ++t) dir[t] = w[t] * g[t] - c0 * w[t] * wg;
+            const double L0 = logLik(counts, r, m, k, p);
+            bool moved = false;
+            double alpha = 1.0;
+            for (int bt = 0; bt < 24; ++bt) {
+                double sum = 0.0;
+                bool ok = true;
+                for (int t = 0; t < f; ++t) {
+                    trial[t] = p[t] + alpha * dir[t];
+                    if (trial[t] <= 0.0 || trial[t] >= 1.0) { ok = false; break; }
+                    sum += trial[t];
+                }
+                if (ok && sum < 1.0) {
+                    trial[f] = 1.0 - sum;
+                    if (logLik(counts, r, m, k, trial) > L0) { moved = true; break; }
+                }
+                alpha *= 0.5;
+            }
+            if (!moved) break;
+            double shift = 0.0;
+            for (int t = 0; t < f; ++t) {
+                const double dt = trial[t] - p[t];
+                const double ad = dt < 0.0 ? -dt : dt;
+                if (ad > shift) shift = ad;
+            }
+            p = trial;
+            if (shift < 1e-13) break;
+        }
+        (void)N;
+        for (int i = 0; i < m; ++i) if (p[i] <= 0.0 || p[i] >= 1.0) return false;
+        return true;
+    }
+
     static bool libraryEstimates(const Counts& counts, int N, const Params& testPar,
         bool testIsA, int numUnknown, Est& s, Est& o)
     {
+        const int m = testPar.m;
+        s.p.assign(m, 0.0);
+        o.p.assign(m, 0.0);
+        std::vector<double> sAll, oAll;
+        if (!theModel(m, testIsA).estimates(flatten(counts, m), N, sAll, oAll)) return false;
+        estFromTsc(sAll, m, s);
+        estFromTsc(oAll, m, o);
+        if (numUnknown < 1) { s.p_ch = testPar.p_ch; o.p_ch = testPar.p_ch; }
+        if (numUnknown < 2) { s.p_adv = testPar.p_adv; o.p_adv = testPar.p_adv; }
         if (numUnknown == 0) {
-            s.p_ch = testPar.p_ch;
-            s.p_adv = testPar.p_adv;
-            o = s;
-            s.outside = false;
-            o.outside = false;
-            return true;
+            // p_ch, p_adv are known: p_0..p_{m-2} must be maximised of the
+            // log-likelihood with p_ch, p_adv held fixed (library's
+            // CalcEnhancedEstimates steps all four parameters jointly instead).
+            o.p = s.p;
+            if (!newtonP(counts, N, m, testIsA, s.p_ch, s.p_adv, o.p, 50)) o.p = s.p;
         }
-
-        const std::vector<double> flat = flatten(counts, testPar.m);
-        const bool pAdvFixed = (numUnknown < 2);
-        return theModel(testPar.m, testIsA)
-            .estimateChAdv(flat, N, pAdvFixed, testPar.p_adv, s, o);
+        s.outside = outsideEst(s);
+        o.outside = outsideEst(o);
+        return true;
+    }
+    // ... ...... .. df:
+    //   df = StatesCount - NANParamCount - 1
+    // . .. ... ... ... ... . numUnknown .. . . . :
+    //   numEstimated = (m-1) + numUnknown
+    //   (m-1 - .. .. ... ... ... ... .. p_0..p_{m-2} .. ... . .. . .. p_ch, p_adv)
+    static int numEstimatedFor(int m, bool isA, int numUnknown)
+    {
+        const int nAll = theModel(m, isA).libraryParamCount();
+        return (nAll - 2) + numUnknown;
     }
 
     // ----------------------------------------------------------------------
@@ -419,24 +596,66 @@ namespace chi2test {
         }
     };
 
+    // Режимы группировки:
+    //   0: без группировки, все ячейки   - Tsc::Grouping::NoneGroup
+    //   1: объединение неинформативных ячеек - MergeNonInformative (одна категория)
+    //   2: StandardGroup                  - Tsc::Grouping::StandardGroup
+    //   3: AutoGroup                      - Tsc::Grouping::AutoGroup (число групп зависит от данных)
+    //   4: ShrinkGroup                    - Tsc::Grouping::ShrinkGroup
+    static const int kModeCount = 5;
+    static const int kDfDynamic = -1;   // AutoGroup: число групп вычисляется по выборке
+
     static const char* modeName(int mode)
     {
-        static const char* names[3] = { "все ячейки", "объединение", "только инф." };
-        return names[mode];
+        static const char* names[kModeCount] = {
+            "без группировки", "объединение неинформативных",
+            "StandardGroup", "AutoGroup", "ShrinkGroup" };
+        return (mode >= 0 && mode < kModeCount) ? names[mode] : "?";
     }
 
-    // df = (число групп) - 1 - (число оцениваемых параметров)
+    // df = (число групп) - 1 - (число оцениваемых параметров).
+    // Для AutoGroup число групп вычисляется по данным => kDfDynamic.
     static int chiDf(int m, int mode, int numEstimated)
     {
-        int cells = (mode == 0) ? m * m : (mode == 1 ? 2 * (m - 1) + 1 : 2 * (m - 1));
+        int cells = 0;
+        switch (mode) {
+        case 0: cells = m * m; break;            // NoneGroup
+        case 1: cells = 2 * (m - 1) + 1; break;  // MergeNonInformative
+        case 2: cells = m + 3; break;            // StandardGroup
+        case 4: cells = 3; break;                // ShrinkGroup
+        default: return kDfDynamic;              // AutoGroup
+        }
         return cells - 1 - numEstimated;
     }
 
+    static std::string dfStr(int m, int mode, int numEstimated)
+    {
+        const int df = chiDf(m, mode, numEstimated);
+        if (df == kDfDynamic) return "dynamic";
+        std::ostringstream os;
+        os << df;
+        return os.str();
+        return os.str();
+    }
+    static void noteMode(int mode)
+    {
+        if (mode != 4) return;
+        static bool noted = false;
+        if (noted) return;
+        noted = true;
+        std::cerr << "Внимание: режим 4 (Tsc::Grouping::ShrinkGroup) не даёт m*m "
+            << "состояний - библиотечная группировка строит sqrt(m*m) групп вместо "
+            << "числа ячеек m*m (ShrinkGroup.h, int len = sqrt(states.size())), "
+            << "поэтому после подгонки число групп перестаёт равняться m*m, "
+            << "и критерий для этого режима не определён.\n";
+    }
+
+
     static void requireDf(int df)
     {
-        if (df < 1) {
+        if (df != kDfDynamic && df < 1) {
             std::cerr << "df < 1 (" << df
-                << "): неверно заданы mode/m/numUnknown, расчёт невозможен\n";
+                << "): проверьте mode/m/numUnknown, параметры некорректны\n";
             std::exit(1);
         }
     }
@@ -449,39 +668,84 @@ namespace chi2test {
         bool defined;     // false, если p-value не определено
     };
 
-    // Теоретические вероятности и наблюдаемые частоты для подходящего режима.
+    // Критерий: группировка состояний и вычисление критерия на полученных группах.
+    // Значение X^2 и p-value считает TSCPlevel::CPLevel.
+    //
+    // df вычисляет библиотека: CPLevel::CalcChiValue(empiric) без df даёт
+    // df = (число групп) - 1; из неё вычитается число оцениваемых параметров,
+    // и получается df для расчёта p-value.
     static ChiResult chiSquare(const Counts& counts, int N, const Params& par,
-        bool testModel1, int mode, int df)
+        bool testModel1, int mode, int numEstimated)
     {
         ChiResult r;
-        r.stat = 0.0; r.plevel = 0.0; r.minNPi = 0.0; r.df = df; r.defined = false;
-        if (df < 1) return r;
+        r.stat = 0.0; r.plevel = 0.0; r.minNPi = 0.0; r.df = 0; r.defined = false;
 
         const int m = par.m;
         const std::vector<double> allProbs = jointProbs(par, testModel1);
+        if (allProbs.size() != static_cast<size_t>(m) * m) return r;
 
         std::vector<double> theoretic, empiric;
         theoretic.reserve(m * m);
         empiric.reserve(m * m);
         for (int i = 0; i < m; i++) {
             for (int j = 0; j < m; j++) {
-                if (mode == 2 && !isInformative(i, j)) continue;   // только инф. ячейки
                 theoretic.push_back(allProbs[i * m + j]);
                 empiric.push_back(static_cast<double>(counts[i][j]));
             }
         }
 
-        PLevel::CPLevel chi;   // CPLevel::Init выполняет расчёт в CalcChiValue
+        PLevel::CPLevel chi;   // CPLevel::Init задаёт стратегию, CalcChiValue считает X^2
         try {
             if (mode == 1) {
                 MergeNonInformative<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+            else if (mode == 2) {
+                Tsc::Grouping::StandardGroup<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+            else if (mode == 3) {
+                Tsc::Grouping::AutoGroup<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+            else if (mode == 4) {
+                Tsc::Grouping::ShrinkGroup<PLevel::uint, double> strategy;
+                // Ограничение: библиотечный ShrinkGroup объединяет состояния по sqrt(состояния)
+                // и настраивается один раз, но он всё равно даёт не m*m ячеек, а m, не m*m.
+                // Режим 4 всё равно бесполезен, даже если вручную выставить CPLevel::Init,
+                // число групп после этого не совпадает с числом ячеек критерия.
+                strategy.setSize(N);
+                strategy.setStates(theoretic);
+                strategy.setLevel(5.0);
+                strategy.setMinSize(1);
+                std::vector<PLevel::uint> shrink = strategy();
+                if (static_cast<int>(shrink.size()) != m * m) {
+                    static bool warned = false;
+                    if (!warned) {
+                        warned = true;
+                        std::cerr << "Внимание: Tsc::Grouping::ShrinkGroup для "
+                            << (m * m) << " состояний вернул " << shrink.size()
+                            << " групп (ожидалось sqrt(m*m)=" << m << ")."
+                            << " Режим 4 отключён.\n";
+                    }
+                    return r;
+                }
                 chi.Init(theoretic, N, strategy);
             }
             else {
                 Tsc::Grouping::NoneGroup<PLevel::uint, double> strategy;
                 chi.Init(theoretic, N, strategy);
             }
-            chi.CalcChiValue(empiric, df);
+
+            // Первое вычисление: библиотека выдаёт df = (число групп) - 1.
+            chi.CalcChiValue(empiric, /*isCheckSize=*/false);
+            const int dfAll = chi.GetPLevelData().df;
+            const int df = dfAll - numEstimated;
+            r.df = df;
+            if (df < 1) return r;              // df < 1: критерий не определён
+
+            // Второе вычисление: df уже окончательный, считается p-value.
+            chi.CalcChiValue(empiric, df, /*isCheckSize=*/false);
         }
         catch (std::exception&) {
             return r;               // df < 1 или нехватка данных
@@ -491,6 +755,7 @@ namespace chi2test {
         r.stat = data.criterion_value;
         r.plevel = data.plevel;
         r.minNPi = data.minNPi;
+        r.df = data.df;
         r.defined = (data.plevel >= 0.0);
         return r;
     }
@@ -499,19 +764,51 @@ namespace chi2test {
     // Эмпирический размер критерия при известных параметрах
     // ----------------------------------------------------------------------
 
-    static double empiricalRejectionRate(int N, int numTrials, const Params& par,
-        bool sampleFromModel1, bool testModel1, double alpha, std::mt19937& rng,
-        int mode = 0)
+    static bool modelIsValid(const Params& par, bool model1)
     {
-        int rejections = 0;
-        int df = chiDf(par.m, mode, 0);
-        requireDf(df);
+        const std::vector<double> probs = jointProbs(par, model1);
+        if (probs.size() != static_cast<size_t>(par.m) * par.m) return false;
+        for (size_t k = 0; k < probs.size(); ++k)
+            if (!(probs[k] > 0.0)) return false;
+        return true;
+    }
+
+    struct RejRates { double simple; double onestep; };
+
+    // ...... ... ... ... .. ..... ...... ... alpha: H0 ...
+    // . ... ....... ....... ....... ... ... ... ......
+    // df ... ... ... ... ... ... ... ... ...... ...
+    // ... ... ... ... ... ... ... ... .. ... ... .. ... .. . .. ..
+    static RejRates empiricalRejectionRate(int N, int numTrials, const Params& par,
+        bool sampleFromModel1, bool testModel1, double alpha, std::mt19937& rng,
+        int numUnknown = 0, int mode = 0)
+    {
+        RejRates r; r.simple = 0.0; r.onestep = 0.0;
+        int rejS = 0, rejO = 0, total = 0;
+        const int numEstAll = numEstimatedFor(par.m, testModel1, numUnknown);
+        requireDf(chiDf(par.m, mode, numEstAll));
         for (int t = 0; t < numTrials; t++) {
             Counts counts = generateSample(N, par, sampleFromModel1, rng);
-            ChiResult cr = chiSquare(counts, N, par, testModel1, mode, df);
-            if (cr.defined && cr.plevel < alpha) rejections++;
+            Est s, o;
+            if (!libraryEstimates(counts, N, par, testModel1, numUnknown, s, o)) continue;
+            total++;
+            Params ps = par, po = par;
+            ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
+            po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
+            if (modelIsValid(ps, testModel1)) {
+                ChiResult cr = chiSquare(counts, N, ps, testModel1, mode, numEstAll);
+                if (cr.defined && cr.plevel < alpha) rejS++;
+            }
+            if (modelIsValid(po, testModel1)) {
+                ChiResult cr = chiSquare(counts, N, po, testModel1, mode, numEstAll);
+                if (cr.defined && cr.plevel < alpha) rejO++;
+            }
         }
-        return static_cast<double>(rejections) / numTrials;
+        if (total > 0) {
+            r.simple = static_cast<double>(rejS) / total;
+            r.onestep = static_cast<double>(rejO) / total;
+        }
+        return r;
     }
 
     // ----------------------------------------------------------------------
@@ -541,13 +838,6 @@ namespace chi2test {
         int failed = 0;                             // ошибки TSC / оценок
     };
 
-    static bool modelIsValid(const Params& par, bool model1)
-    {
-        const std::vector<double> probs = jointProbs(par, model1);
-        for (size_t k = 0; k < probs.size(); ++k)
-            if (!(probs[k] > 0.0)) return false;
-        return true;
-    }
 
     static EstPValues collectPValuesEstimated(int N, int numTrials, const Params& par,
         bool modelIsA, int numUnknown, std::mt19937& rng, int mode = 0)
@@ -555,10 +845,9 @@ namespace chi2test {
         EstPValues res;
         res.simple.reserve(numTrials);
         res.onestep.reserve(numTrials);
-        int df = chiDf(par.m, mode, numUnknown);
-        requireDf(df);
+        const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);
+        requireDf(chiDf(par.m, mode, numEstAll));
         int os = 0, oo = 0, bs = 0, bo = 0, valid = 0;
-
         for (int t = 0; t < numTrials; t++) {
             Counts counts;
             Est s, o;
@@ -569,18 +858,17 @@ namespace chi2test {
             valid++;
             if (s.outside) os++;
             if (o.outside) oo++;
-
-            Params ps = par, po = par;  // p_i остаются известными
-            ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
-            po.p_ch = o.p_ch; po.p_adv = o.p_adv;
+            Params ps = par, po = par;  // p_i, p_ch, p_adv - ... ... ... ... ...
+            ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
+            po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
             if (modelIsValid(ps, modelIsA)) {
-                ChiResult cr = chiSquare(counts, N, ps, modelIsA, mode, df);
+                ChiResult cr = chiSquare(counts, N, ps, modelIsA, mode, numEstAll);
                 res.simple.push_back(cr.defined ? cr.plevel : 0.0);
                 if (!cr.defined) bs++;
             }
             else { res.simple.push_back(0.0); bs++; }
             if (modelIsValid(po, modelIsA)) {
-                ChiResult cr = chiSquare(counts, N, po, modelIsA, mode, df);
+                ChiResult cr = chiSquare(counts, N, po, modelIsA, mode, numEstAll);
                 res.onestep.push_back(cr.defined ? cr.plevel : 0.0);
                 if (!cr.defined) bo++;
             }
@@ -606,18 +894,15 @@ namespace chi2test {
         EstPValues res;
         res.simple.reserve(numTrials);
         res.onestep.reserve(numTrials);
-        int df = chiDf(par.m, mode, numUnknown);
-        requireDf(df);
+        const int numEstAll = numEstimatedFor(par.m, testModelIsA, numUnknown);
+        requireDf(chiDf(par.m, mode, numEstAll));
         int os = 0, oo = 0, bs = 0, bo = 0, valid = 0;
-
         Params genPar = par;
         genPar.p_ch = trueCh;
         genPar.p_adv = trueAdv;
-
         Params testPar = par;
         testPar.p_adv = trueAdv;
-        testPar.p_ch = trueCh;   // истинные значения для numUnknown == 0
-
+        testPar.p_ch = trueCh;   // numUnknown == 0: ... ... ... ... ... ...
         for (int t = 0; t < numTrials; t++) {
             Counts counts;
             Est s, o;
@@ -628,18 +913,17 @@ namespace chi2test {
             valid++;
             if (s.outside) os++;
             if (o.outside) oo++;
-
             Params ps = testPar, po = testPar;
-            ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
-            po.p_ch = o.p_ch; po.p_adv = o.p_adv;
+            ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
+            po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
             if (modelIsValid(ps, testModelIsA)) {
-                ChiResult cr = chiSquare(counts, N, ps, testModelIsA, mode, df);
+                ChiResult cr = chiSquare(counts, N, ps, testModelIsA, mode, numEstAll);
                 res.simple.push_back(cr.defined ? cr.plevel : 0.0);
                 if (!cr.defined) bs++;
             }
             else { res.simple.push_back(0.0); bs++; }
             if (modelIsValid(po, testModelIsA)) {
-                ChiResult cr = chiSquare(counts, N, po, testModelIsA, mode, df);
+                ChiResult cr = chiSquare(counts, N, po, testModelIsA, mode, numEstAll);
                 res.onestep.push_back(cr.defined ? cr.plevel : 0.0);
                 if (!cr.defined) bo++;
             }
@@ -709,19 +993,18 @@ namespace chi2test {
         const std::string& csvPath)
     {
         std::ofstream csv(csvPath.c_str());
-        csv << "mode,p,size,power,power_calibrated,min_expected\n";
+        csv << "mode,p,power\n";
         std::cout << "\n########## Мощность в зависимости от p_i ##########\n";
         std::cout << "N = " << N << ", повторов = " << trials << ", alpha = " << alpha
             << ", p_ch = " << pch << ", p_adv = " << padv
             << ", оцениваемых параметров: " << numUnknownAlt << "\n";
-        if (numUnknownAlt == 2)
-            std::cout << "Внимание: при 2 неизвестных оценка одношаговая.\n";
 
         for (size_t mi = 0; mi < modes.size(); ++mi) {
             int mode = modes[mi];
+            noteMode(mode);
             std::cout << "\n--- режим: " << modeName(mode)
-                << ", df = " << chiDf(par0.m, mode, numUnknownAlt) << " ---\n";
-            std::cout << std::setw(24) << "p" << " | size   power  powerCal  minExp\n";
+                << ", df = " << dfStr(par0.m, mode, numEstimatedFor(par0.m, true, numUnknownAlt)) << " ---\n";
+            std::cout << std::setw(24) << "p" << " |  power\n";
             for (size_t gi = 0; gi < pGrid.size(); ++gi) {
                 const std::vector<double>& praw = pGrid[gi];
                 Params par = par0;
@@ -738,34 +1021,23 @@ namespace chi2test {
                     label += (i ? "/" : "") + os.str();
                 }
 
-                if (chiDf(par.m, mode, numUnknownAlt) < 1) {
+                const int dfHere = chiDf(par.m, mode, numEstimatedFor(par.m, true, numUnknownAlt));
+                if (dfHere != kDfDynamic && dfHere < 1) {
                     std::cout << std::setw(24) << label << " | df < 1, пропуск\n";
                     continue;
                 }
-                std::vector<double> pr = jointProbs(par, true);
-                double minExp = 1e300;
-                for (size_t k = 0; k < pr.size(); ++k) minExp = (std::min)(minExp, N * pr[k]);
 
-                EstPValues h0 = collectPValuesCrossModel(N, trials, par, true, pch, padv,
-                    true, numUnknownAlt, rng, mode);
                 EstPValues h1 = collectPValuesCrossModel(N, trials, par, true, pch, padv,
                     false, numUnknownAlt, rng, mode);
-                if (h0.onestep.empty() || h1.onestep.empty()) {
+                if (h1.onestep.empty()) {
                     std::cout << std::setw(24) << label << " | нет пригодных выборок TSC\n";
                     continue;
                 }
-                double size = rejectionRate(h0.onestep, alpha);
                 double power = rejectionRate(h1.onestep, alpha);
-                double cutoff = lowerQuantile(h0.onestep, alpha);
-                int c = 0;
-                for (size_t k = 0; k < h1.onestep.size(); ++k) if (h1.onestep[k] < cutoff) c++;
-                double powerCal = static_cast<double>(c) / h1.onestep.size();
 
                 std::cout << std::setw(24) << label << " | " << std::fixed << std::setprecision(3)
-                    << size << "  " << power << "  " << powerCal << "     "
-                    << std::setprecision(1) << minExp << "\n";
-                csv << mode << "," << label << "," << size << "," << power << ","
-                    << powerCal << "," << minExp << "\n";
+                    << power << "\n";
+                csv << mode << "," << label << "," << power << "\n";
             }
         }
         std::cout << "\nРезультаты записаны в " << csvPath << "\n\n";
@@ -861,31 +1133,6 @@ namespace chi2test {
         return true;
     }
 
-    // Известные p_i по строкам файла.
-    static void pFromRows(const Counts& counts, int m, long N, std::vector<double>& p)
-    {
-        p.assign(m, 0.0);
-        double sum = 0.0;
-        for (int i = 0; i + 1 < m; ++i) {
-            long r = 0;
-            for (int j = 0; j < m; ++j) r += counts[i][j];
-            p[i] = static_cast<double>(r) / static_cast<double>(N);
-            sum += p[i];
-        }
-        p[m - 1] = 1.0 - sum;
-    }
-
-    // Набор оценок TSC -> параметры: [p_0 ... p_{m-2}, p_ch, p_adv].
-    static void paramsFromTsc(const std::vector<double>& est, int m, Params& par)
-    {
-        par.m = m;
-        par.p.assign(m, 0.0);
-        double sum = 0.0;
-        for (int i = 0; i + 1 < m; ++i) { par.p[i] = est[i]; sum += est[i]; }
-        par.p[m - 1] = 1.0 - sum;
-        par.p_ch = est[m - 1];
-        par.p_adv = est[m];
-    }
 
     static void fileSampleCriterion(const std::string& path, const Params& base,
         const std::vector<int>& modes, int numUnknown, bool testIsA, double alpha)
@@ -898,7 +1145,7 @@ namespace chi2test {
         for (int i = 0; i < m; ++i)
             for (int j = 0; j < m; ++j) total += counts[i][j];
         if (total <= 0) { std::cerr << "Нет данных: сумма частот равна нулю\n"; return; }
-        int N = static_cast<int>(total);
+        int N = 300;                // sample size
 
         std::cout << "==================================================\n";
         std::cout << "Проверка по файлу " << path << ": m = " << m << ", N = " << N
@@ -916,68 +1163,52 @@ namespace chi2test {
         }
         std::cout << "\n\n";
 
-        Params ps, po;
-        ps.m = m;
-        ps.p_ch = base.p_ch;
-        ps.p_adv = base.p_adv;
-        pFromRows(counts, m, total, ps.p);
-        po = ps;
-
-        if (numUnknown == 2) {
-            // Оцениваются p_i, p_ch и p_adv.
-            std::vector<double> sAll, oAll;
-            if (!theModel(m, testIsA).estimates(flatten(counts, m), N, sAll, oAll)) {
-                std::cerr << "Не удалось получить оценки TSC\n";
-                return;
-            }
-            paramsFromTsc(sAll, m, ps);
-            paramsFromTsc(oAll, m, po);
-            std::cout << "Оценки TSC (простые / усиленные):\n";
-            for (int i = 0; i + 1 < m; ++i)
-                std::cout << "  p" << i << " = " << std::fixed << std::setprecision(4)
-                    << ps.p[i] << " / " << po.p[i] << "\n";
-            std::cout << "  pch = " << ps.p_ch << " / " << po.p_ch << "\n";
-            std::cout << "  padv = " << ps.p_adv << " / " << po.p_adv << "\n\n";
+        Params testPar = base;
+        testPar.m = m;
+        Est es, eo;
+        g_printTscHeader = true;
+        if (!libraryEstimates(counts, N, testPar, testIsA, numUnknown, es, eo)) {
+            std::cerr << ".. ....... ........ ...... TSC\n";
+            return;
         }
-        else {
-            // p_i и p_adv известны, оценивается только p_ch.
-            Est es, eo;
-            g_printTscHeader = true;
-        if (!libraryEstimates(counts, N, ps, testIsA, numUnknown, es, eo)) {
-                std::cerr << "Не удалось получить оценки TSC\n";
-                return;
-            }
-            ps.p_ch = es.p_ch; ps.p_adv = es.p_adv;
-            po.p_ch = eo.p_ch; po.p_adv = eo.p_adv;
-            std::cout << "Оценки (простые / усиленные): pch = " << std::fixed
-                << std::setprecision(4) << ps.p_ch << " / " << po.p_ch
-                << ", padv = " << ps.p_adv << " / " << po.p_adv << "\n\n";
-        }
-
+        Params ps = testPar, po = testPar;
+        ps.p = es.p; ps.p_ch = es.p_ch; ps.p_adv = es.p_adv;
+        po.p = eo.p; po.p_ch = eo.p_ch; po.p_adv = eo.p_adv;
+        std::cout << "...... TSC (....... / .........):\n";
+        for (int i = 0; i + 1 < m; ++i)
+            std::cout << "  p" << i << " = " << std::fixed << std::setprecision(4)
+                << ps.p[i] << " / " << po.p[i] << "\n";
+        std::cout << "  pch = " << ps.p_ch << " / " << po.p_ch << "\n";
+        std::cout << "  padv = " << ps.p_adv << " / " << po.p_adv << "\n\n";
         const char* names[2] = { "simple  ", "one-step" };
         Params used[2];
         used[0] = ps;
         used[1] = po;
-
         for (size_t mi = 0; mi < modes.size(); ++mi) {
             int mode = modes[mi];
-            int dfKnown = chiDf(m, mode, numUnknown);
-            int dfAll = dfKnown - (m - 1);
+            noteMode(mode);
+            const int numEstAll = numEstimatedFor(m, testIsA, numUnknown);
             std::cout << "==================================================\n";
-            std::cout << "Режим: " << modeName(mode) << ", df = " << dfAll
-                << " (p_i тоже оцениваются)\n";
+            std::cout << "...........: " << modeName(mode) << ", df = "
+                << dfStr(m, mode, numEstAll) << " (... .. " << numEstAll << " ... ... ... ...)\n";
             std::cout << "==================================================\n";
-            if (dfAll < 1) { std::cout << "df < 1: расчёт невозможен\n\n"; continue; }
+            {
+                const int dfCheck = chiDf(m, mode, numEstAll);
+                if (dfCheck != kDfDynamic && dfCheck < 1) {
+                    std::cout << "df < 1: ...... ........\n\n";
+                    continue;
+                }
+            }
             for (int k = 0; k < 2; ++k) {
                 if (!modelIsValid(used[k], testIsA)) {
                     std::cout << "  " << names[k]
-                        << " модель вырождена: некоторые состояния невозможны, p-value не вычисляется\n";
+                        << " ...... .........: ............. ..........., p-value .. ...........\n";
                     continue;
                 }
-                ChiResult cr = chiSquare(counts, N, used[k], testIsA, mode, dfAll);
+                ChiResult cr = chiSquare(counts, N, used[k], testIsA, mode, numEstAll);
                 if (!cr.defined) {
                     std::cout << "  " << names[k]
-                        << " недостаточно данных: p-value не определён\n";
+                        << " критерий не применён: p-value не вычислен\n";
                     continue;
                 }
                 std::cout << "  " << names[k] << " chi2 = " << std::fixed
@@ -985,15 +1216,6 @@ namespace chi2test {
                     << ", p-value = " << std::setprecision(6) << cr.plevel
                     << ", alpha = " << std::setprecision(3) << alpha
                     << " -> " << (cr.plevel < alpha ? "отклоняем H0" : "не отклоняем H0") << "\n";
-            }
-            if (dfKnown >= 1) {
-                ChiResult rk = chiSquare(counts, N, ps, testIsA, mode, dfKnown);
-                ChiResult ro = chiSquare(counts, N, po, testIsA, mode, dfKnown);
-                std::cout << "  (при известных p_i, df = " << dfKnown << ": simple = "
-                    << (rk.defined ? rk.plevel : 0.0)
-                    << ", one-step = "
-                    << (ro.defined ? ro.plevel : 0.0)
-                    << ")\n";
             }
             std::cout << "\n";
         }
@@ -1019,23 +1241,29 @@ namespace chi2test {
 
         // ---------------- настройки: как в nw.cpp ----------------
         Params par;
-        par.m = 3;
+        par.m = 6;
         par.p_ch = 0.2;
         par.p_adv = 0.05;
         par.p.clear();
-        par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // известные p_i
-        int N = 300;                 // объём выборки
-        int numTrials = 1000;        // число повторов
+        //par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // p_i
+        for (int i = 0; i < 6; ++i)
+            par.p.push_back(1);
+        int N = 300;                // sample size
+        int numTrials = 1000;        // Monte Carlo trials
         double alpha = 0.1;          // уровень значимости
         bool modelIsA = true;        // true: модель А
-        int numUnknown = 0;          // 0: ничего; 1: оценивается p_ch; 2: p_ch и p_adv
-        int numUnknownAlt = 0;       // для power (0 или 1; 2 не проверяется)
+        int numUnknown = 2;          // numUnknown
+        int numUnknownAlt = 2;       // для power (0 или 1; 2 не проверяется)
         bool fixedSeed = false;      // true: воспроизводимые генерации
-        bool sanityCheck = false;     // проверка согласованности TSC
+        bool sanityCheck = false;      // при отладке печатает подробные проверки (число состояний в 1 таблице, их в 2 таблицах)
         g_transposeSample = false;   // true, если категории TSC заданы наоборот
         std::vector<int> modes;
-        modes.push_back(0); modes.push_back(1);// modes.push_back(2);
-        // --- проверка по файлу частот ---
+        modes.push_back(0);
+        //modes.push_back(1); тоже был признан некорректным (объединение неинформативных ячеек, не соответствующее критерию):(
+        modes.push_back(2);
+        modes.push_back(3);
+        // modes.push_back(4);   // ShrinkGroup: не реализовано здесь, но в критерии тоже бесполезно
+        // --- ........ .. ..... ...... ---
         bool checkFileSample = false;         // true: проверить файл
         bool onlyFileSample = false;         // true: только файл
         std::string fileSamplePath = "DES95765Group.txt";
@@ -1043,9 +1271,9 @@ namespace chi2test {
         bool runPowerStudy = false;          // true: выполнить study
         bool onlyPowerStudy = false;         // true: только мощность
         int psN = 300;
-        int psTrials = 5000;
+        int psTrials = 1000;
         double psAlpha = 0.05;
-        int psUnknown = 0;                   // 0 или 1
+        int psUnknown = 0;
         double psPch = 0.2, psPadv = 0.05;
         std::vector<std::vector<double> > pGrid;
         const double p0s[7] = { 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8 };
@@ -1062,6 +1290,7 @@ namespace chi2test {
             pGrid.push_back(v);
         }
         // ------------------------------------------------------------
+        if (sanityCheck) { return 0; }
 
         if (numUnknown < 0 || numUnknown > 2 || numUnknownAlt < 0 || numUnknownAlt > 2) {
             std::cerr << "numUnknown и numUnknownAlt должны быть 0, 1 или 2\n";
@@ -1077,6 +1306,10 @@ namespace chi2test {
             << ", N = " << N << ", numTrials = " << numTrials << "\n";
         std::cout << "модель H0: модель " << (modelIsA ? "А" : "Б")
             << ", оцениваемых параметров: " << numUnknown << "\n\n";
+        // df, ... ... ... ... ... ... TSCCalc (model.cpp:268):
+        //   df = StatesCount - NANParamCount - 1
+        const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);
+
 
         if (sanityCheck) sanityCheckTsc(par, N, rng);
         if (checkFileSample) {
@@ -1116,24 +1349,37 @@ namespace chi2test {
         // --- эмпирические размеры критерия ---
         for (size_t mi = 0; mi < modes.size(); ++mi) {
             int mode = modes[mi];
+            noteMode(mode);
+            {
+                const int dfCheck = chiDf(par.m, mode, numEstAll);
+                if (dfCheck != kDfDynamic && dfCheck < 1) {
+                    std::cout << "==================================================\n";
+                    std::cout << ".....: " << modeName(mode) << ", df = " << dfCheck
+                        << " (< 1): ... .. " << numEstAll
+                        << " ... ... ... ... ... ... ......\n";
+                    std::cout << "==================================================\n\n";
+                    continue;
+                }
+            }
             std::cout << "==================================================\n";
             std::cout << "Режим: " << modeName(mode)
-                << ", df (известные параметры) = " << chiDf(par.m, mode, 0)
-                << ", df (оценка) = " << chiDf(par.m, mode, numUnknown) << "\n";
+                << ", df (расчётный) = " << dfStr(par.m, mode, numEstAll) << "\n";
             std::cout << "==================================================\n\n";
 
-            double typeI = empiricalRejectionRate(N, numTrials, par, modelIsA, modelIsA, alpha, rng, mode);
-            double power = empiricalRejectionRate(N, numTrials, par, modelIsA, !modelIsA, alpha, rng, mode);
-            std::cout << "Эмпирические размеры, alpha = " << alpha << ":\n";
-            std::cout << "  размер критерия (H0 верна): " << typeI << "\n";
-            std::cout << "  мощность при H0 неверна: " << power << "\n\n";
+            RejRates typeI = empiricalRejectionRate(N, numTrials, par, modelIsA, modelIsA, alpha, rng, numUnknown, mode);
+            RejRates power = empiricalRejectionRate(N, numTrials, par, modelIsA, !modelIsA, alpha, rng, numUnknown, mode);
+            std::cout << "............ ......., alpha = " << alpha << ":\n";
+            std::cout << "  ...... ........ (H0 .....): simple = " << typeI.simple
+                << ", one-step = " << typeI.onestep << "\n";
+            std::cout << "  ........ ... H0 .......: simple = " << power.simple
+                << ", one-step = " << power.onestep << "\n\n";
 
             std::ostringstream modeStr;
             modeStr << mode;
             EstPValues pv = collectPValuesEstimated(N, numTrials, par, modelIsA, numUnknown, rng, mode);
             writePValuesCsv("pvalues_simple_mode" + modeStr.str() + ".csv", pv.simple);
             writePValuesCsv("pvalues_onestep_mode" + modeStr.str() + ".csv", pv.onestep);
-            std::cout << "Размер критерия при H0 (df = " << chiDf(par.m, mode, numUnknown) << "):\n";
+            std::cout << "Размер критерия при H0 (df = " << dfStr(par.m, mode, numEstAll) << "):\n";
             std::cout << "     alpha | 0.010  0.020  0.030  0.040  0.050  0.100\n";
             printRejectionTable("simple", pv.simple);
             printRejectionTable("one-step", pv.onestep);
@@ -1151,12 +1397,16 @@ namespace chi2test {
                     << numUnknownAlt << " (" << modeName(mode) << ") ---\n";
                 int powN = 300;
                 int powTrials = 1000;
-                if (chiDf(par.m, mode, numUnknownAlt) < 1) {
+                const int dfHere = chiDf(par.m, mode, numEstimatedFor(par.m, modelIsA, numUnknownAlt));
+                if (dfHere != kDfDynamic && dfHere < 1) {
                     std::cout << "df < 1, пропуск\n\n";
                     continue;
                 }
                 std::vector<std::pair<double, double> > grid;
+                //grid.push_back(std::make_pair(0.4, 0.6));
                 grid.push_back(std::make_pair(0.05, 0.2));
+                //grid.push_back(std::make_pair(0.2, 0.8));
+                //grid.push_back(std::make_pair(0.1, 0.9));
                 for (size_t gi = 0; gi < grid.size(); ++gi) {
                     double padv = grid[gi].first, pch = grid[gi].second;
                     EstPValues cross = collectPValuesCrossModel(powN, powTrials, par,
