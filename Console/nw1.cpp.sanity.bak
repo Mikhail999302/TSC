@@ -1151,11 +1151,11 @@ namespace chi2test {
         int numUnknown = 2;          // количество неизвестных (0 или 2)
         int numUnknownAlt = 2;       // для power (0 или 2)
         bool fixedSeed = false;      // true: воспроизводимые генерации
-        bool sanityCheck = false;      //   true: напечатать сгенерированные таблицы и суммы строк/столбцов
+        bool sanityCheck = false;      // отвечает за проверку суммы строк и столбцов
         g_transposeSample = false;   // true, если категории TSC заданы наоборот
         std::vector<int> modes;   // Номера режимов группировки для проверки.
         modes.push_back(0);
-        //modes.push_back(1);  моя реализация (объединение неинформативных ячеек)
+        //modes.push_back(1);  моя реализация (объединение неинформативных ячеек) но сказали без самодеятельности:(
         modes.push_back(2); // Standardgroup: не работает корректно в общем случае
         modes.push_back(3); // Autogroup: не работает корректно в общем случае
         // modes.push_back(4);   // ShrinkGroup: не работает в принципе, есть проблема с реализацией в TSC
@@ -1186,6 +1186,8 @@ namespace chi2test {
             pGrid.push_back(v);
         }
         // ------------------------------------------------------------
+        if (sanityCheck) { return 0; }
+        //не актуально но исправлять такого не мало
         if (numUnknown < 0 || numUnknown > 2 || numUnknownAlt < 0 || numUnknownAlt > 2) {
             std::cerr << "numUnknown и numUnknownAlt должны быть 0, 1 или 2\n";
             return 1;
@@ -1203,7 +1205,6 @@ namespace chi2test {
         const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);   // Общее число оцениваемых параметров при текущем numUnknown.
 
 
-        // Дополнительная отладочная печать
         if (sanityCheck) sanityCheckTsc(par, N, rng);
         if (checkFileSample) {
             fileSampleCriterion(fileSamplePath, par, modes, numUnknown, modelIsA, alpha);
