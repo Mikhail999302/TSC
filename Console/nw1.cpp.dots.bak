@@ -1145,12 +1145,12 @@ namespace chi2test {
         for (int i = 0; i < m; ++i)
             for (int j = 0; j < m; ++j) total += counts[i][j];
         if (total <= 0) { std::cerr << "Нет данных: сумма частот равна нулю\n"; return; }
-        int N = static_cast<int>(total);   // N = сумма частот из файла
+        int N = 300;                // sample size
 
         std::cout << "==================================================\n";
         std::cout << "Проверка по файлу " << path << ": m = " << m << ", N = " << N
             << ", модель " << (testIsA ? "А" : "Б")
-            << ", оцениваемых параметров: " << numEstimatedFor(m, testIsA, numUnknown) << "\n";
+            << ", оцениваемых параметров: " << numUnknown << "\n";
         for (int i = 0; i < m; ++i) {
             for (int j = 0; j < m; ++j) std::cout << std::setw(8) << counts[i][j];
             std::cout << "\n";
@@ -1168,13 +1168,13 @@ namespace chi2test {
         Est es, eo;
         g_printTscHeader = true;
         if (!libraryEstimates(counts, N, testPar, testIsA, numUnknown, es, eo)) {
-            std::cerr << "не удалось получить оценки TSC\n";
+            std::cerr << ".. ....... ........ ...... TSC\n";
             return;
         }
         Params ps = testPar, po = testPar;
         ps.p = es.p; ps.p_ch = es.p_ch; ps.p_adv = es.p_adv;
         po.p = eo.p; po.p_ch = eo.p_ch; po.p_adv = eo.p_adv;
-        std::cout << "Оценки TSC (simple / one-step):\n";
+        std::cout << "...... TSC (....... / .........):\n";
         for (int i = 0; i + 1 < m; ++i)
             std::cout << "  p" << i << " = " << std::fixed << std::setprecision(4)
                 << ps.p[i] << " / " << po.p[i] << "\n";
@@ -1189,20 +1189,20 @@ namespace chi2test {
             noteMode(mode);
             const int numEstAll = numEstimatedFor(m, testIsA, numUnknown);
             std::cout << "==================================================\n";
-            std::cout << "Группировка: " << modeName(mode) << ", df = "
-                << dfStr(m, mode, numEstAll) << " (оценено параметров: " << numEstAll << ", k = m-1+numUnknown)\n";
+            std::cout << "...........: " << modeName(mode) << ", df = "
+                << dfStr(m, mode, numEstAll) << " (... .. " << numEstAll << " ... ... ... ...)\n";
             std::cout << "==================================================\n";
             {
                 const int dfCheck = chiDf(m, mode, numEstAll);
                 if (dfCheck != kDfDynamic && dfCheck < 1) {
-                    std::cout << "df < 1: критерий не применим\n\n";
+                    std::cout << "df < 1: ...... ........\n\n";
                     continue;
                 }
             }
             for (int k = 0; k < 2; ++k) {
                 if (!modelIsValid(used[k], testIsA)) {
                     std::cout << "  " << names[k]
-                        << " модель невалидна: оценки вне (0,1), p-value не вычислен\n";
+                        << " ...... .........: ............. ..........., p-value .. ...........\n";
                     continue;
                 }
                 ChiResult cr = chiSquare(counts, N, used[k], testIsA, mode, numEstAll);
@@ -1241,28 +1241,28 @@ namespace chi2test {
 
         // ---------------- настройки: как в nw.cpp ----------------
         Params par;
-        par.m = 3;
+        par.m = 6;
         par.p_ch = 0.2;
         par.p_adv = 0.05;
         par.p.clear();
-        par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // p_i
-        /*for (int i = 0; i < 6; ++i)
-            par.p.push_back(1);*/
-        int N = 300;                // sample size
+        //par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // p_i
+        for (int i = 0; i < 6; ++i)
+            par.p.push_back(1);
+        int N = 500;                // sample size
         int numTrials = 1000;        // Monte Carlo trials
         double alpha = 0.1;          // уровень значимости
-        bool modelIsA = false;        // true: модель А
-        int numUnknown = 0;          // numUnknown
-        int numUnknownAlt = 0;       // для power (0 или 1; 2 не проверяется)
+        bool modelIsA = true;        // true: модель А
+        int numUnknown = 2;          // numUnknown
+        int numUnknownAlt = 2;       // для power (0 или 1; 2 не проверяется)
         bool fixedSeed = false;      // true: воспроизводимые генерации
         bool sanityCheck = false;      // при отладке печатает подробные проверки (число состояний в 1 таблице, их в 2 таблицах)
         g_transposeSample = false;   // true, если категории TSC заданы наоборот
         std::vector<int> modes;
         modes.push_back(0);
         //modes.push_back(1); тоже был признан некорректным (объединение неинформативных ячеек, не соответствующее критерию):(
-        modes.push_back(2); // Standardgroup: не работает корректно в общем случае
-        modes.push_back(3); // Autogroup: не работает корректно в общем случае
-        // modes.push_back(4);   // ShrinkGroup: не работает в принципе, есть проблема с реализацией в TSC
+        modes.push_back(2);
+        modes.push_back(3);
+        // modes.push_back(4);   // ShrinkGroup: не реализовано здесь, но в критерии тоже бесполезно
         // --- ........ .. ..... ...... ---
         bool checkFileSample = true;         // true: проверить файл
         bool onlyFileSample = true;         // true: только файл
@@ -1354,9 +1354,9 @@ namespace chi2test {
                 const int dfCheck = chiDf(par.m, mode, numEstAll);
                 if (dfCheck != kDfDynamic && dfCheck < 1) {
                     std::cout << "==================================================\n";
-                    std::cout << "Режим: " << modeName(mode) << ", df = " << dfCheck
-                        << " (< 1): при " << numEstAll
-                        << " оцениваемых параметрах критерий неприменим\n";
+                    std::cout << ".....: " << modeName(mode) << ", df = " << dfCheck
+                        << " (< 1): ... .. " << numEstAll
+                        << " ... ... ... ... ... ... ......\n";
                     std::cout << "==================================================\n\n";
                     continue;
                 }
@@ -1368,10 +1368,10 @@ namespace chi2test {
 
             RejRates typeI = empiricalRejectionRate(N, numTrials, par, modelIsA, modelIsA, alpha, rng, numUnknown, mode);
             RejRates power = empiricalRejectionRate(N, numTrials, par, modelIsA, !modelIsA, alpha, rng, numUnknown, mode);
-            std::cout << "Эмпирические размеры, alpha = " << alpha << ":\n";
-            std::cout << "  Размер критерия (H0 верен): simple = " << typeI.simple
+            std::cout << "............ ......., alpha = " << alpha << ":\n";
+            std::cout << "  ...... ........ (H0 .....): simple = " << typeI.simple
                 << ", one-step = " << typeI.onestep << "\n";
-            std::cout << "  Мощность при H0 неверна: simple = " << power.simple
+            std::cout << "  ........ ... H0 .......: simple = " << power.simple
                 << ", one-step = " << power.onestep << "\n\n";
 
             std::ostringstream modeStr;
