@@ -1,3 +1,4 @@
+
 //
 // Критерий хи-квадрат для двухшагового опроса (модели А и Б), встроенный в проект TSC.
 //   * выборки генерируются генераторами TSC:
@@ -21,20 +22,10 @@
 //       категория из (0,0) и всех (i,j), i!=j, j!=0.  df = 2m-2 - numUnknown;
 //   2 - ОТБРАСЫВАНИЕ: только 2(m-1) информативных ячеек, df = 2m-3 - numUnknown.
 // Обрезания оценок до [0,1] нет. Если pi_ij <= 0, p-value = 0.
-//
-// КРИТЕРИЙ ХИ-КВАДРАТ РЕАЛИЗОВАН БИБЛИОТЕКОЙ, а не вручную:
-//   * статистика и p-value - классом PLevel::CPLevel (проект TSCPLevel,
-//     TSCPlevel\plevel.cpp). CPLevel::Init() применяет стратегию группировки
-//     к теоретическим и эмпирическим частотам, CPLevel::CalcChiValue()
-//     считает X^2 и p-value = 1 - pChi(X^2, df);
-//   * pChi() - функция распределения хи-квадрат из TSCPlevel\PROBDIST.CPP
-//     (pChi возвращает CDF, то есть p-value = 1 - pChi);
-//   * стратегии группировки - шаблонные классы из проекта Libs (Grouping):
-//     Tsc::Grouping::NoneGroup (mode 0 и 2) и класс MergeNonInformative
-//     ниже (mode 1), реализованный как наследник Tsc::Grouping::IMergeGrouping;
-//   * свои оценки (estimateSimple / oneStepUpdate) остаются в nw.cpp: в библиотеке
-//     оценок для случая "известен только p_adv" нет, TSC всегда оценивает оба
-//     параметра сразу.
+
+//#define _CRTDBG_MAP_ALLOC
+//#include <stdlib.h>
+//#include <crtdbg.h>
 #pragma once
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -62,6 +53,75 @@
 namespace chi2test {
 
     typedef std::vector<std::vector<int> > Counts;
+
+    // ----------------------------------------------------------------------
+    // p-value хи-квадрат через регуляризованную неполную гамма-функцию
+    // ----------------------------------------------------------------------
+
+    static double gammln(double xx) {
+        static const double cof[6] = {
+            76.18009172947146,   -86.50532032941677,   24.01409824083091,
+            -1.231739572450155,  0.1208650973866179e-2, -0.5395239384953e-5 };
+        double x = xx, y = xx;
+        double tmp = x + 5.5;
+        tmp -= (x + 0.5) * std::log(tmp);
+        double ser = 1.000000000190015;
+        for (int j = 0; j < 6; j++) {
+            y += 1.0;
+            ser += cof[j] / y;
+        }
+        return -tmp + std::log(2.5066282746310005 * ser / x);
+    }
+
+    static double gammaSeries(double a, double x) {
+        if (x <= 0.0) return 0.0;
+        double gln = gammln(a);
+        double ap = a;
+        double sum = 1.0 / a;
+        double del = sum;
+        for (int n = 1; n <= 500; n++) {
+            ap += 1.0;
+            del *= x / ap;
+            sum += del;
+            if (std::fabs(del) < std::fabs(sum) * 1e-14) break;
+        }
+        return sum * std::exp(-x + a * std::log(x) - gln);
+    }
+
+    static double gammaContFrac(double a, double x) {
+        const double FPMIN = 1e-300;
+        double gln = gammln(a);
+        double b = x + 1.0 - a;
+        double c = 1.0 / FPMIN;
+        double d = 1.0 / b;
+        double h = d;
+        for (int i = 1; i <= 500; i++) {
+            double an = -i * (i - a);
+            b += 2.0;
+            d = an * d + b;
+            if (std::fabs(d) < FPMIN) d = FPMIN;
+            c = b + an / c;
+            if (std::fabs(c) < FPMIN) c = FPMIN;
+            d = 1.0 / d;
+            double del = d * c;
+            h *= del;
+            if (std::fabs(del - 1.0) < 1e-14) break;
+        }
+        return std::exp(-x + a * std::log(x) - gln) * h;
+    }
+
+    static double gammaQ(double a, double x) {
+        if (x < 0.0 || a <= 0.0) return 1.0;
+        if (x == 0.0) return 1.0;
+        if (x < a + 1.0) return 1.0 - gammaSeries(a, x);
+        return gammaContFrac(a, x);
+    }
+
+    // p = P(Chi2_df >= stat)
+    static double chiSquarePValue(double stat, int df) {
+        if (stat <= 0.0) return 1.0;
+        return gammaQ(df / 2.0, stat / 2.0);
+    }
 
     // ----------------------------------------------------------------------
     // Модели
@@ -254,38 +314,12 @@ namespace chi2test {
     }
 
     // ----------------------------------------------------------------------
-    // РЕЖИМЫ ТАБЛИЦЫ: СТРАТЕГИЯ ГРУППИРОВКИ И КРИТЕРИЙ (PLevel::CPLevel)
+    // РЕЖИМЫ ТАБЛИЦЫ
     // ----------------------------------------------------------------------
 
     static bool isInformative(int i, int j) {
         return i != 0 && (j == 0 || i == j);
     }
-
-    // Стратегия группировки для mode = 1: каждая информативная ячейка (i!=0 и
-    // j=0 или i=j) образует отдельную группу, все остальные ячейки - (0,0) и
-    // (i,j) с i!=j, j!=0 - объединяются в одну общую группу.
-    // Индексы выдаются подряд с нуля (требование Tsc::Grouping::IMergeGrouping):
-    // 0 - объединённая категория, далее 1, 2, ... - информативные ячейки.
-    template <class ReturnType = unsigned int, class ValueType = double>
-    class MergeNonInformative : public Tsc::Grouping::IMergeGrouping<ReturnType, ValueType>
-    {
-        typedef std::vector<ReturnType> ReturnTypes;
-    public:
-        MergeNonInformative(int identificator = 0)
-            : Tsc::Grouping::IMergeGrouping<ReturnType, ValueType>(identificator) {}
-        virtual ReturnTypes operator()()
-        {
-            const int cells = static_cast<int>(this->states.size());
-            const int m = static_cast<int>(std::floor(std::sqrt(static_cast<double>(cells)) + 0.5));
-            ReturnTypes res(cells, 0);
-            ReturnType next = 1;
-            for (int i = 0; i < m; ++i)
-                for (int j = 0; j < m; ++j)
-                    if (isInformative(i, j))
-                        res[i * m + j] = next++;
-            return res;
-        }
-    };
 
     static const char* modeName(int mode) {
         static const char* names[3] = { "полная таблица", "объединение", "отбрасывание" };
@@ -305,63 +339,28 @@ namespace chi2test {
         }
     }
 
-    // Результат критерия. Структура повторяет PLevel::PLevelData из TSCPlevel\PLEVEL.H
-    // и дополнительно сообщает, определён ли p-value.
-    struct ChiResult {
-        double stat;      // X^2
-        double plevel;    // p-value
-        double minNPi;    // минимальная ожидаемая частота среди групп
-        int df;
-        bool defined;     // false, если хотя бы в одной группе N*p <= 0
-    };
-
-    // Критерий хи-квадрат через библиотечный класс PLevel::CPLevel.
-    //   theoretic - теоретические вероятности ячеек (доли, не частоты);
-    //   empiric    - наблюдённые частоты;
-    //   стратегия группировки сворачивает ячейки в группы одинаковыми индексами.
-    // mode = 0: полная таблица (Tsc::Grouping::NoneGroup);
-    // mode = 1: объединение неинформативных ячеек (MergeNonInformative);
-    // mode = 2: неинформативные ячейки не передаются в CPLevel вовсе.
-    static ChiResult chiSquare(const Counts& counts, int N, const Params& par,
-        bool testModel1, int mode, int df) {
-        ChiResult r;
-        r.stat = 0.0; r.plevel = 0.0; r.minNPi = 0.0; r.df = df; r.defined = false;
-        if (df < 1) return r;
-
-        const int m = par.m;
-        std::vector<double> theoretic, empiric;
-        theoretic.reserve(m * m);
-        empiric.reserve(m * m);
+    static double chiSquareStat(const Counts& counts, int N,
+        const Params& par, bool testModel1, int mode = 0) {
+        int m = par.m;
+        double stat = 0.0, eRest = 0.0, nRest = 0.0;
         for (int i = 0; i < m; i++) {
             for (int j = 0; j < m; j++) {
-                if (mode == 2 && !isInformative(i, j)) continue;   // ячейка отброшена
-                theoretic.push_back(piModel(testModel1, i, j, par) * par.p[i]);
-                empiric.push_back(static_cast<double>(counts[i][j]));
+                double e = piModel(testModel1, i, j, par) * par.p[i] * N;
+                if (mode != 0 && !isInformative(i, j)) {
+                    eRest += e;
+                    nRest += counts[i][j];
+                    continue;
+                }
+                if (e < 1e-10) continue;
+                double diff = counts[i][j] - e;
+                stat += diff * diff / e;
             }
         }
-
-        PLevel::CPLevel chi;   // CPLevel::Init обязателен до CalcChiValue
-        try {
-            if (mode == 1) {
-                MergeNonInformative<PLevel::uint, double> strategy;
-                chi.Init(theoretic, N, strategy);
-            }
-            else {
-                Tsc::Grouping::NoneGroup<PLevel::uint, double> strategy;
-                chi.Init(theoretic, N, strategy);
-            }
-            chi.CalcChiValue(empiric, df);
+        if (mode == 1 && eRest > 1e-10) {   // объединенная категория
+            double diff = nRest - eRest;
+            stat += diff * diff / eRest;
         }
-        catch (std::exception&) {
-            return r;               // df < 1 или иная ошибка вычислителя
-        }
-
-        const PLevel::PLevelData& data = chi.GetPLevelData();
-        r.stat = data.criterion_value;
-        r.plevel = data.plevel;
-        r.minNPi = data.minNPi;
-        r.defined = (data.plevel >= 0.0);
-        return r;
+        return stat;                        // mode == 2: категория просто отброшена
     }
 
     // ----------------------------------------------------------------------
@@ -376,16 +375,14 @@ namespace chi2test {
         requireDf(df);
         for (int t = 0; t < numTrials; t++) {
             Counts counts = generateSample(N, par, sampleFromModel1, rng);
-            ChiResult cr = chiSquare(counts, N, par, testModel1, mode, df);
-            if (cr.defined && cr.plevel < alpha) rejections++;
+            double stat = chiSquareStat(counts, N, par, testModel1, mode);
+            if (chiSquarePValue(stat, df) < alpha) rejections++;
         }
         return static_cast<double>(rejections) / numTrials;
     }
 
     // ----------------------------------------------------------------------
-    // СОБСТВЕННЫЕ ОЦЕНКИ (используются только при numUnknown == 1; при 2 - оценки TSC).
-    // В библиотеке нет оценок для случая "известен только p_adv", поэтому они
-    // остаются здесь; при numUnknown == 2 используются оценки TSC.
+    // СОБСТВЕННЫЕ ОЦЕНКИ (используются только при numUnknown == 1; при 2 - оценки TSC)
     // ----------------------------------------------------------------------
 
     // Простая оценка (метод моментов)
@@ -563,17 +560,11 @@ namespace chi2test {
             Params ps = par, po = par;  // p_i остаются истинными
             ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
             po.p_ch = o.p_ch; po.p_adv = o.p_adv;
-            if (modelIsValid(ps, modelIsA)) {
-                ChiResult cr = chiSquare(counts, N, ps, modelIsA, mode, df);
-                res.simple.push_back(cr.defined ? cr.plevel : 0.0);
-                if (!cr.defined) bs++;
-            }
+            if (modelIsValid(ps, modelIsA))
+                res.simple.push_back(chiSquarePValue(chiSquareStat(counts, N, ps, modelIsA, mode), df));
             else { res.simple.push_back(0.0); bs++; }
-            if (modelIsValid(po, modelIsA)) {
-                ChiResult cr = chiSquare(counts, N, po, modelIsA, mode, df);
-                res.onestep.push_back(cr.defined ? cr.plevel : 0.0);
-                if (!cr.defined) bo++;
-            }
+            if (modelIsValid(po, modelIsA))
+                res.onestep.push_back(chiSquarePValue(chiSquareStat(counts, N, po, modelIsA, mode), df));
             else { res.onestep.push_back(0.0); bo++; }
         }
         double denom = valid > 0 ? valid : 1;
@@ -625,17 +616,11 @@ namespace chi2test {
             Params ps = testPar, po = testPar;
             ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
             po.p_ch = o.p_ch; po.p_adv = o.p_adv;
-            if (modelIsValid(ps, testModelIsA)) {
-                ChiResult cr = chiSquare(counts, N, ps, testModelIsA, mode, df);
-                res.simple.push_back(cr.defined ? cr.plevel : 0.0);
-                if (!cr.defined) bs++;
-            }
+            if (modelIsValid(ps, testModelIsA))
+                res.simple.push_back(chiSquarePValue(chiSquareStat(counts, N, ps, testModelIsA, mode), df));
             else { res.simple.push_back(0.0); bs++; }
-            if (modelIsValid(po, testModelIsA)) {
-                ChiResult cr = chiSquare(counts, N, po, testModelIsA, mode, df);
-                res.onestep.push_back(cr.defined ? cr.plevel : 0.0);
-                if (!cr.defined) bo++;
-            }
+            if (modelIsValid(po, testModelIsA))
+                res.onestep.push_back(chiSquarePValue(chiSquareStat(counts, N, po, testModelIsA, mode), df));
             else { res.onestep.push_back(0.0); bo++; }
         }
         double denom = valid > 0 ? valid : 1;
@@ -798,6 +783,10 @@ namespace chi2test {
             std::cout << "\n\n";
         }
     }
+
+    // ----------------------------------------------------------------------
+    // ЗАПУСК ЭКСПЕРИМЕНТОВ (бывшая main5)
+    // ----------------------------------------------------------------------
 
     // ----------------------------------------------------------------------
     // Своя выборка: квадратная таблица m x m из файла, частоты - целые числа
@@ -998,27 +987,20 @@ namespace chi2test {
                         << " оценки дают неположительные вероятности: p-value не определён\n";
                     continue;
                 }
-                ChiResult cr = chiSquare(counts, N, used[k], testIsA, mode, dfAll);
-                if (!cr.defined) {
-                    std::cout << "  " << names[k]
-                        << " ожидаемая частота неположительна: p-value не определён\n";
-                    continue;
-                }
+                double stat = chiSquareStat(counts, N, used[k], testIsA, mode);
+                double pv = chiSquarePValue(stat, dfAll);
                 std::cout << "  " << names[k] << " chi2 = " << std::fixed
-                    << std::setprecision(4) << cr.stat
-                    << ", p-value = " << std::setprecision(6) << cr.plevel
+                    << std::setprecision(4) << stat
+                    << ", p-value = " << std::setprecision(6) << pv
                     << ", alpha = " << std::setprecision(3) << alpha
-                    << " -> " << (cr.plevel < alpha ? "отвергаем H0" : "не отвергаем H0") << "\n";
+                    << " -> " << (pv < alpha ? "отвергаем H0" : "не отвергаем H0") << "\n";
             }
-            if (dfKnown >= 1) {
-                ChiResult rk = chiSquare(counts, N, ps, testIsA, mode, dfKnown);
-                ChiResult ro = chiSquare(counts, N, po, testIsA, mode, dfKnown);
+            if (dfKnown >= 1)
                 std::cout << "  (если p_i считать известными, df = " << dfKnown << ": simple = "
-                    << (rk.defined ? rk.plevel : 0.0)
+                    << chiSquarePValue(chiSquareStat(counts, N, ps, testIsA, mode), dfKnown)
                     << ", one-step = "
-                    << (ro.defined ? ro.plevel : 0.0)
+                    << chiSquarePValue(chiSquareStat(counts, N, po, testIsA, mode), dfKnown)
                     << ")\n";
-            }
             std::cout << "\n";
         }
     }
@@ -1039,9 +1021,6 @@ namespace chi2test {
             SetConsoleOutputCP(1251);
     }
 #endif
-        // PLevel::CPLevel пишет отладочные сообщения через Dumper, поэтому дампер
-        // должен быть инициализирован до первого расчета критерия.
-        initDumper();
 
         // ---------------- Настройки: меняйте здесь ----------------
         Params par;

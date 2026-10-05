@@ -1,0 +1,1436 @@
+// nw1.cpp - вариант nw.cpp, в котором вся математика считается библиотекой.
+//
+// Ручные формулы pi_ij, оценки p_ch/p_adv и критерий из nw.cpp удалены.
+// Теперь:
+//   * p(xi_1=i, xi_2=j) = p_i * pi_ij считает TSCCalc (CTSCModel_1Pos /
+//     CTSCModel_1Pos_mine): формулы состояний читаются через
+//     DataProcessing::ReadExpressions и вычисляются как CExpression::Eval();
+//   * оценки p_ch и p_adv считает ECalc: CalcSimpleEstimates (простые
+//     оценки) и CalcEnhancedEstimates (усиленные оценки);
+//   * генерация выборки - TSCGenerator (CGenerator_1Pos / CGenerator_1Pos_mine);
+//   * X^2 и p-value - TSCPlevel::CPLevel (все три режима группировки).
+//
+// Локально остаются только разбор файла, печать, сборка параметров
+// (известные p_i и p_adv), стратегия группировки (только номера групп)
+// и подсчёт df.
+
+#include <windows.h>
+#include <algorithm>
+#include <clocale>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <numeric>
+#include <random>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "HelperFunctions.h"
+#include "..\ECalc\BaseDiscreteModel.h"
+#include "..\ECalc\discretemodel.h"
+#include "..\ECalc\DataParameters.h"
+#include "..\MathCalc\MathCalcMisc.h"
+
+namespace chi2test {
+
+    typedef std::vector<std::vector<int> > Counts;
+
+    // ----------------------------------------------------------------------
+    // Параметры
+    // ----------------------------------------------------------------------
+
+    struct Params {
+        int m;                  // размер категории
+        double p_ch;
+        double p_adv;
+        std::vector<double> p;  // p_i = P(xi_1 = i), известны
+    };
+
+    struct Est {
+        std::vector<double> p;  // p_i = P(xi_1 = i), p[m-1] = 1 - sum(p_i)
+        double p_ch;
+        double p_adv;
+        bool outside;  // true, .... .... .. .... ...... ... [0, 1]
+    };
+
+    static bool outside01(double v) { return v < 0.0 || v > 1.0; }
+
+    static bool outsideEst(const Est& e)
+    {
+        bool bad = outside01(e.p_ch) || outside01(e.p_adv);
+        for (size_t i = 0; i + 1 < e.p.size(); ++i)
+            if (outside01(e.p[i])) bad = true;
+        return bad;
+    }
+    // ..... ...... TSC -> .........: [p_0 ... p_{m-2}, p_ch, p_adv].
+    // ... ... ..... ... . p_i (p_{m-1} = 1 - sum), p_ch . p_adv.
+    static void estFromTsc(const std::vector<double>& all, int m, Est& e)
+    {
+        if (static_cast<int>(all.size()) < m + 1) { e.outside = true; return; }
+        e.p.assign(m, 0.0);
+        double sum = 0.0;
+        for (int i = 0; i + 1 < m; ++i) { e.p[i] = all[i]; sum += all[i]; }
+        e.p[m - 1] = 1.0 - sum;
+        e.p_ch = all[m - 1];
+        e.p_adv = all[m];
+        e.outside = outsideEst(e);
+    }
+
+    // true, если категории TSC заданы наоборот (xi_2 = xi_1)
+    static bool g_transposeSample = false;
+    static int g_tscFailed = 0;
+
+    // ----------------------------------------------------------------------
+    // Модель TSC из библиотек TSCCalc + ECalc.
+    //
+    // Параметры в MathCalc адресуются глобально по именам ("pch", "padv",
+    // "p0", ...), поэтому каждому экземпляру модели выделяется своя карта
+    // параметров (AddMap/SelectMap/RemoveMap). Хранилище карт - std::list,
+    // поэтому указатели действительны и при нескольких живых моделях.
+    // Перед вычислением состояний или оценок модель выбирает свою карту.
+    // ----------------------------------------------------------------------
+    static bool g_printTscHeader = false;
+
+    class TscModel
+    {
+    public:
+        TscModel(int m, bool isA)
+            : m_m(m)
+            , m_isA(isA)
+            , m_mapId(MathCalc::MathContext::MapIDType(0))
+            , m_comp(0, 0)
+            , m_ldot()
+            , m_info()
+            , m_rep()
+            , m_states()
+            , m_se()
+            , m_paramInfos()
+            , m_model()
+        {
+            initDumper();
+
+            m_mapId = MathCalc::MathContext::AddMap();
+            MathCalc::MathContext::SelectMap(m_mapId);
+
+            try {
+                if (m_isA)
+                    m_rep.reset(new GroupedTSC::CTSCModel_1Pos(m, ETSCModel, m_ldot, m_info));
+                else
+                    m_rep.reset(new GroupedTSC::CTSCModel_1Pos_mine(m, ETSCModel, m_ldot, m_info));
+
+                // Описание состояний (модель) и формул оценок
+                std::auto_ptr<GroupedTSC::TModelManager> modelDef(
+                    m_rep->CreateModelManager(m, m));
+                const MathCalc::MathString modelStr = m_rep->SetModelStrRep(*modelDef);
+                const MathCalc::MathString estStr = m_rep->SetEstimatesFormulasStrRep(m);
+
+                DataProcessing::ReadExpressions(modelStr, m_states, _T("p"));
+                DataProcessing::ReadEstimates(estStr, m_se);
+
+                const size_t n = static_cast<size_t>(m) + 1;
+                if (m_se.size() != n) {
+                    std::cerr << "TSC: " << m_se.size() << " формул оценок, ожидалось m+1 = "
+                        << n << "\n";
+                    throw std::runtime_error("TSC estimates count");
+                }
+
+                // Кэшеры строят символические выражения l_dot и InfoMatrix
+                // при первом обращении, поэтому начальные значения в карте
+                // должны быть корректными.
+                m_paramInfos = MathModels::CMathParameterInfos(m_se);
+
+                static bool printedNames = false;
+                if (!printedNames && g_printTscHeader) {
+                    printedNames = true;
+                    std::cout << "Оценки TSC (библиотечные формулы); "
+                        << "p_ch = [" << (m - 1) << "], p_adv = [" << m << "]:\n";
+                    for (size_t i = 0; i < n; ++i)
+                        std::cout << "  [" << i << "] " << m_se[i]->GetParameterName() << "\n";
+                    std::cout << "\n";
+                }
+
+                m_model = MathModels::CreateModel(MathModels::CBaseDiscreteModel::mt2D);
+                m_model->Init(m_states, m_paramInfos, m_comp,
+                    m_ldot, m_info, MathModels::CMathOperationIndicator(),
+                    /*_isCalcInfoMatrix=*/true, /*_isBMatrix=*/false);
+                // Совпадение имён параметров с картой: перед первым расчётом
+                // библиотека строит символьные выражения (CalcSimpleEstimates)
+                // при первом обращении, поэтому начальные значения в карте
+                // по значениям из карты, поэтому значения в карте
+                // должны совпадать с теми, что передаются в оценку.
+                // CalcFrequencies -> SetContextValues().
+                {
+                    m_dummy.assign(static_cast<size_t>(m) * m, 1.0);
+                    m_dummyN = m * m;
+                    MathModels::CMathParameterValues est;
+                    if (!m_model->CalcSimpleEstimates(m_dummy, m_dummyN, m_se, est))
+                        throw std::runtime_error("TSC simple estimates failed");
+                    if (est.size() != n)
+                        throw std::runtime_error("TSC parameters count");
+                    est.SetContextValues();
+                }
+            }
+            catch (...) {
+                MathCalc::MathContext::RemoveMap(m_mapId);
+                m_mapId = MathCalc::MathContext::MapIDType(0);
+                throw;
+            }
+        }
+
+        ~TscModel()
+        {
+            m_model.release();
+            m_rep.reset();
+            MathCalc::MathContext::RemoveMap(m_mapId);
+        }
+
+        int dim() const { return m_m; }
+        // ... ... ... ....... df, ... TSCCalc (model.cpp:268):
+        //   df = GetStatesCount() - GetNANParametersCount() - 1
+        int libraryStatesCount() const { return m_model->GetStatesCount(); }
+        int libraryParamCount() const { return m_model->GetNANParametersCount(); }
+
+        // p(xi_1 = i, xi_2 = j) = p_i * pi_ij, раскладка [i*m + j].
+        // Теоретические вероятности состояний: CBaseDiscreteModel::CalcFrequencies
+        // (при n = 1 библиотека возвращает произведения p_i * pi_ij). Значения p_i и
+        // p_ch/p_adv передаются явно в CMathParameterValues, остальное берётся из выражений.
+        // p(xi_1 = i, xi_2 = j) = p_i * pi_ij, раскладка [i*m + j].
+        // Теоретические вероятности состояний: CBaseDiscreteModel::CalcFrequencies
+        // (при n = 1 библиотека возвращает произведения p_i * pi_ij).
+        // Первый аргумент counts нужен библиотеке только для построения оценок,
+        // значения параметров в CMathParameterValues задаются явно, поэтому
+        // итог от CalcSimpleEstimates не влияет на результат: частоты считает
+        // только CalcFrequencies по переданным значениям параметров.
+        // Пустые (нулевые) частоты для вероятностей не нужны, но длина должна совпадать.
+        bool jointProbs(const std::vector<double>& counts, int n,
+            const std::vector<double>& p, double pCh, double pAdv,
+            std::vector<double>& probs) const
+        {
+            const size_t np = static_cast<size_t>(m_m) + 1;
+            if (p.size() < static_cast<size_t>(m_m) - 1) return false;
+            if (counts.size() != static_cast<size_t>(m_m) * m_m) return false;
+
+            MathCalc::MathContext::SelectMap(m_mapId);
+
+            MathModels::CMathParameterValues est;
+            if (!m_model->CalcSimpleEstimates(counts, n, m_se, est)) return false;
+            if (est.size() != np) return false;
+            for (int i = 0; i + 1 < m_m; ++i) est[i].Value = p[i];
+            est[m_m - 1].Value = pCh;
+            est[m_m].Value = pAdv;
+
+            probs.clear();
+            return m_model->CalcFrequencies(est, 1, probs);
+        }
+
+        // Версия без выборки: подставляет фиктивные counts (все единицы),
+        // потому что для вероятностей нужны только параметры, а не частоты ячеек.
+        bool jointProbs(const std::vector<double>& p, double pCh, double pAdv,
+            std::vector<double>& probs) const
+        {
+            return jointProbs(m_dummy, m_dummyN, p, pCh, pAdv, probs);
+        }
+
+        // Оценки библиотекой по таблице частот counts (раскладка [i*m + j]).
+        // counts - исходные частоты (не нормированные), N - их сумма.
+        // Возвращает полные наборы из m+1 параметров:
+        // simple = [p_0 ... p_{m-2}, p_ch, p_adv] из CalcSimpleEstimates,
+        // onestep - то же из CalcEnhancedEstimates.
+        bool estimates(const std::vector<double>& counts, int N,
+            std::vector<double>& simple, std::vector<double>& onestep) const
+        {
+            const size_t n = static_cast<size_t>(m_m) + 1;
+            if (counts.size() != static_cast<size_t>(m_m) * m_m) return false;
+
+            MathCalc::MathContext::SelectMap(m_mapId);
+
+            MathModels::CMathParameterValues est;
+
+            if (!m_model->CalcSimpleEstimates(counts, N, m_se, est)) return false;
+            if (est.size() != n) return false;
+
+
+            simple.assign(n, 0.0);
+            for (size_t i = 0; i < n; ++i) simple[i] = est[i].Value;
+
+            // CalcEnhancedEstimates повторяет простой шаг и добавляет
+            // усиление Фишера; Gamma = 0 отключает доверительные интервалы.
+            if (!m_model->CalcEnhancedEstimates(counts, N, m_se, est, 0.0)) return false;
+            if (est.size() != n) return false;
+            onestep.assign(n, 0.0);
+            for (size_t i = 0; i < n; ++i) onestep[i] = est[i].Value;
+
+            return true;
+        }
+
+
+    private:
+
+        int m_m;
+        bool m_isA;
+        MathCalc::MathContext::MapIDType m_mapId;
+        MathModels::CCacherComparingStruct m_comp;
+
+        // Порядок объявления важен: m_rep хранит ссылки на кэшеры,
+        // поэтому при разрушении он должен умереть раньше них.
+        MathModels::TLDotCacher m_ldot;
+        MathModels::TInfoCacher m_info;
+        std::auto_ptr<GroupedTSC::IModelRep> m_rep;
+        MathModels::CExpressions m_states;
+        std::vector<double> m_dummy;
+        int m_dummyN = 0;
+        MathModels::CMathParameterEstimates m_se;
+        MathModels::CMathParameterInfos m_paramInfos;
+        MathModels::ModelPtr m_model;
+    };
+
+    // Две модели (А и Б) создаются один раз и переиспользуются.
+    static std::auto_ptr<TscModel> g_modelA;
+    static std::auto_ptr<TscModel> g_modelB;
+
+    static TscModel& theModel(int m, bool isA)
+    {
+        std::auto_ptr<TscModel>& slot = isA ? g_modelA : g_modelB;
+        const int cached = slot.get() ? slot->dim() : 0;
+        if (!slot.get() || cached != m) {
+            slot.reset();
+            slot.reset(new TscModel(m, isA));
+        }
+        return *slot;
+    }
+
+    // Модель А или Б выбирается флагом; модель кэшируется и пересоздаётся
+    // только при смене m. Сами вероятности считает CalcFrequencies; результат - вектор m*m.
+    static std::vector<double> jointProbs(const Params& par, bool model1)
+    {
+        std::vector<double> probs;
+        theModel(par.m, model1).jointProbs(par.p, par.p_ch, par.p_adv, probs);
+        return probs;
+    }
+
+    // ----------------------------------------------------------------------
+    // Генерация TSC: библиотека
+    // ----------------------------------------------------------------------
+
+    // Параметры генератора: p_0..p_{m-1}, p_ch, p_adv
+    static TSCGenerator::doubles makeDistrib(const Params& par)
+    {
+        TSCGenerator::doubles d;
+        for (size_t i = 0; i + 1 < par.p.size(); ++i) d.push_back(par.p[i]);
+        d.push_back(par.p_ch);
+        d.push_back(par.p_adv);
+        return d;
+    }
+
+    // Из плоского sample m*m -> counts[xi_1][xi_2]
+    static void tableFromSample(const doubles& sample, int m, int N, Counts& counts)
+    {
+        if (static_cast<int>(sample.size()) != m * m) {
+            std::cerr << "Размер выборки TSC = " << sample.size()
+                << ", ожидалось m*m = " << m * m << "\n";
+            std::exit(1);
+        }
+        counts.assign(m, std::vector<int>(m, 0));
+        long total = 0;
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < m; j++) {
+                int c = static_cast<int>(std::floor(sample[i * m + j] + 0.5));
+                if (g_transposeSample) counts[j][i] = c; else counts[i][j] = c;
+                total += c;
+            }
+        }
+        if (total != N) {
+            std::cerr << "Сумма частот выборки TSC = " << total << " != N = " << N
+                << ": генератор TSC не согласован?\n";
+            std::exit(1);
+        }
+    }
+
+    // Генерация выборки TSC заданной модели (Gen = CGenerator_1Pos / _mine).
+    template <class Gen>
+    static bool tscGenerate(const Params& genPar, int N, long seed, Counts& counts)
+    {
+        try {
+            TSCGenerator::doubles distrib = makeDistrib(genPar);
+            std::auto_ptr<Gen> generator(new Gen(distrib, seed));
+            generator->SetSize(N);
+            generator->Generate();
+            doubles sample = generator->GetSample();
+            tableFromSample(sample, genPar.m, N, counts);
+            return true;
+        }
+        catch (std::exception& e) {
+            if (++g_tscFailed <= 5) std::cout << "exception! " << e.what() << std::endl;
+            return false;
+        }
+        catch (...) {
+            if (++g_tscFailed <= 5) std::cout << "unknown exception in TSC" << std::endl;
+            return false;
+        }
+    }
+
+    static long nextSeed(std::mt19937& rng)
+    {
+        return static_cast<long>(rng() & 0x7fffffffu);
+    }
+
+    static Counts generateSample(int N, const Params& par, bool fromModel1, std::mt19937& rng)
+    {
+        Counts counts;
+        long seed = nextSeed(rng);
+        bool ok = fromModel1
+            ? tscGenerate<TSCGenerator::CGenerator_1Pos>(par, N, seed, counts)
+            : tscGenerate<TSCGenerator::CGenerator_1Pos_mine>(par, N, seed, counts);
+        if (!ok) { std::cerr << "Не удалось сгенерировать выборку TSC\n"; std::exit(1); }
+        return counts;
+    }
+
+    // Таблица частот counts -> плоский sample для библиотечных оценок.
+    static std::vector<double> flatten(const Counts& counts, int m)
+    {
+        std::vector<double> flat(static_cast<size_t>(m) * m, 0.0);
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < m; ++j)
+                flat[i * m + j] = static_cast<double>(counts[i][j]);
+        return flat;
+    }
+
+    // ----------------------------------------------------------------------
+    // ......: ...... ..........
+    // ----------------------------------------------------------------------
+    //   numUnknown == 0: ...... ... p_i (p_0..p_{m-2}); p_ch . p_adv ... ...
+    //   numUnknown == 1: ...... ... p_i . p_ch; p_adv ... ...
+    //   numUnknown == 2: ...... ... p_i, p_ch . p_adv
+    //   p_i ...... ... CalcSimpleEstimates / CalcEnhancedEstimates
+    //   (p_i MLE - . . . . .. .); p_ch . p_adv ... . .. . .. ..
+    // testPar - ......... ........... ...... .
+    // ----------------------------------------------------------------------
+    // ----------------------------------------------------------------------
+    // MLE of p_0..p_{m-2} with p_ch and p_adv known (numUnknown == 0).
+    //
+    // Model: q(i,k) = p_i * c(i,k), kernel
+    //     c(i,k) = a*p_k + b*[k==0] + d*[k==i]
+    // (a,b,d) = ((1-padv)*pch, padv, (1-padv)*(1-pch))  for model A,
+    //           (pch*(1-padv), pch*padv, 1-pch)          for model B.
+    //
+    // Row sums (CalcSimpleEstimates) are NOT the MLE here: the kernel depends on
+    // the same p, so p enters q twice.  With p_ch, p_adv fixed the log-likelihood
+    // is strictly concave in p, so  d(logL)/dp = 0  has one interior root, found by
+    // Newton's method (in p-coordinates the Hessian is diagonal, -H = diag(D) +
+    // D_{m-1}*11', inverted in closed form).
+    // ----------------------------------------------------------------------
+    struct KernelABC { double a, b, d; };
+
+    static KernelABC kernelABC(bool model1, double p_ch, double p_adv)
+    {
+        KernelABC k;
+        if (model1) {
+            k.a = (1.0 - p_adv) * p_ch;
+            k.b = p_adv;
+            k.d = (1.0 - p_adv) * (1.0 - p_ch);
+        }
+        else {
+            k.a = p_ch * (1.0 - p_adv);
+            k.b = p_ch * p_adv;
+            k.d = 1.0 - p_ch;
+        }
+        return k;
+    }
+
+    static double logLik(const Counts& counts, const std::vector<double>& r, int m,
+        const KernelABC& k, const std::vector<double>& p)
+    {
+        double L = 0.0;
+        for (int i = 0; i < m; ++i) {
+            if (p[i] <= 0.0) return -1e300;
+            if (r[i] != 0) L += r[i] * std::log(p[i]);
+        }
+        for (int i = 0; i < m; ++i)
+            for (int l = 0; l < m; ++l) {
+                const double c = k.a * p[l] + (l == 0 ? k.b : 0.0) + (l == i ? k.d : 0.0);
+                if (c <= 0.0) return -1e300;
+                if (counts[i][l] != 0) L += counts[i][l] * std::log(c);
+            }
+        return L;
+    }
+
+    static bool newtonP(const Counts& counts, int N, int m, bool model1,
+        double p_ch, double p_adv, std::vector<double>& p, int maxIter)
+    {
+        if (static_cast<int>(p.size()) != m || m < 2) return false;
+        const KernelABC k = kernelABC(model1, p_ch, p_adv);
+        const int f = m - 1;
+        std::vector<double> r(m, 0.0), c(m * m), gp(m, 0.0), D(m, 0.0);
+        std::vector<double> g(f), w(f), dir(f), trial(m);
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < m; ++j) r[i] += counts[i][j];
+        for (int it = 0; it < maxIter; ++it) {
+            for (int i = 0; i < m; ++i)
+                for (int j = 0; j < m; ++j)
+                    c[i * m + j] = k.a * p[j] + (j == 0 ? k.b : 0.0) + (j == i ? k.d : 0.0);
+            bool bad = false;
+            for (int l = 0; l < m; ++l) {
+                const double cll = c[l * m + l];
+                if (p[l] <= 0.0 || cll <= 0.0) { bad = true; break; }
+                double t = 0.0;
+                for (int i = 0; i < m; ++i) t += counts[i][l] / c[i * m + l];
+                gp[l] = r[l] / p[l] + k.a * t;
+                D[l] = r[l] / (p[l] * p[l]) + k.a * k.a * counts[l][l] / (cll * cll);
+            }
+            if (bad) break;
+            double S = 0.0, wg = 0.0;
+            for (int t = 0; t < f; ++t) {
+                if (D[t] <= 0.0) { bad = true; break; }
+                g[t] = gp[t] - gp[m - 1];
+                w[t] = 1.0 / D[t];
+                S += w[t];
+                wg += w[t] * g[t];
+            }
+            if (bad) break;
+            // Newton:  p <- p + (-H)^-1 * g,   -H = diag(D[0..f-1]) + D[m-1]*11'
+            const double den = 1.0 + D[m - 1] * S;
+            if (den <= 0.0) break;
+            const double c0 = D[m - 1] / den;
+            for (int t = 0; t < f; ++t) dir[t] = w[t] * g[t] - c0 * w[t] * wg;
+            const double L0 = logLik(counts, r, m, k, p);
+            bool moved = false;
+            double alpha = 1.0;
+            for (int bt = 0; bt < 24; ++bt) {
+                double sum = 0.0;
+                bool ok = true;
+                for (int t = 0; t < f; ++t) {
+                    trial[t] = p[t] + alpha * dir[t];
+                    if (trial[t] <= 0.0 || trial[t] >= 1.0) { ok = false; break; }
+                    sum += trial[t];
+                }
+                if (ok && sum < 1.0) {
+                    trial[f] = 1.0 - sum;
+                    if (logLik(counts, r, m, k, trial) > L0) { moved = true; break; }
+                }
+                alpha *= 0.5;
+            }
+            if (!moved) break;
+            double shift = 0.0;
+            for (int t = 0; t < f; ++t) {
+                const double dt = trial[t] - p[t];
+                const double ad = dt < 0.0 ? -dt : dt;
+                if (ad > shift) shift = ad;
+            }
+            p = trial;
+            if (shift < 1e-13) break;
+        }
+        (void)N;
+        for (int i = 0; i < m; ++i) if (p[i] <= 0.0 || p[i] >= 1.0) return false;
+        return true;
+    }
+
+    static bool libraryEstimates(const Counts& counts, int N, const Params& testPar,
+        bool testIsA, int numUnknown, Est& s, Est& o)
+    {
+        const int m = testPar.m;
+        s.p.assign(m, 0.0);
+        o.p.assign(m, 0.0);
+        std::vector<double> sAll, oAll;
+        if (!theModel(m, testIsA).estimates(flatten(counts, m), N, sAll, oAll)) return false;
+        estFromTsc(sAll, m, s);
+        estFromTsc(oAll, m, o);
+        if (numUnknown < 1) { s.p_ch = testPar.p_ch; o.p_ch = testPar.p_ch; }
+        if (numUnknown < 2) { s.p_adv = testPar.p_adv; o.p_adv = testPar.p_adv; }
+        if (numUnknown == 0) {
+            // p_ch, p_adv are known: p_0..p_{m-2} must be maximised of the
+            // log-likelihood with p_ch, p_adv held fixed (library's
+            // CalcEnhancedEstimates steps all four parameters jointly instead).
+            o.p = s.p;
+            if (!newtonP(counts, N, m, testIsA, s.p_ch, s.p_adv, o.p, 50)) o.p = s.p;
+        }
+        s.outside = outsideEst(s);
+        o.outside = outsideEst(o);
+        return true;
+    }
+    // ... ...... .. df:
+    //   df = StatesCount - NANParamCount - 1
+    // . .. ... ... ... ... . numUnknown .. . . . :
+    //   numEstimated = (m-1) + numUnknown
+    //   (m-1 - .. .. ... ... ... ... .. p_0..p_{m-2} .. ... . .. . .. p_ch, p_adv)
+    static int numEstimatedFor(int m, bool isA, int numUnknown)
+    {
+        const int nAll = theModel(m, isA).libraryParamCount();
+        return (nAll - 2) + numUnknown;
+    }
+
+    // ----------------------------------------------------------------------
+    // Критерий: группировка и X^2 / p-value (PLevel::CPLevel)
+    // ----------------------------------------------------------------------
+
+    static bool isInformative(int i, int j)
+    {
+        return i != 0 && (j == 0 || i == j);
+    }
+
+    // Все неинформативные ячейки в группу 0, информативные - отдельно.
+    template <class ReturnType = unsigned int, class ValueType = double>
+    class MergeNonInformative : public Tsc::Grouping::IMergeGrouping<ReturnType, ValueType>
+    {
+        typedef std::vector<ReturnType> ReturnTypes;
+    public:
+        MergeNonInformative(int identificator = 0)
+            : Tsc::Grouping::IMergeGrouping<ReturnType, ValueType>(identificator) {}
+        virtual ReturnTypes operator()()
+        {
+            const int cells = static_cast<int>(this->states.size());
+            const int m = static_cast<int>(std::floor(std::sqrt(static_cast<double>(cells)) + 0.5));
+            ReturnTypes res(cells, 0);
+            ReturnType next = 1;
+            for (int i = 0; i < m; ++i)
+                for (int j = 0; j < m; ++j)
+                    if (isInformative(i, j))
+                        res[i * m + j] = next++;
+            return res;
+        }
+    };
+
+    // Режимы группировки:
+    //   0: без группировки, все ячейки   - Tsc::Grouping::NoneGroup
+    //   1: объединение неинформативных ячеек - MergeNonInformative (одна категория)
+    //   2: StandardGroup                  - Tsc::Grouping::StandardGroup
+    //   3: AutoGroup                      - Tsc::Grouping::AutoGroup (число групп зависит от данных)
+    //   4: ShrinkGroup                    - Tsc::Grouping::ShrinkGroup
+    static const int kModeCount = 5;
+    static const int kDfDynamic = -1;   // AutoGroup: число групп вычисляется по выборке
+
+    static const char* modeName(int mode)
+    {
+        static const char* names[kModeCount] = {
+            "без группировки", "объединение неинформативных",
+            "StandardGroup", "AutoGroup", "ShrinkGroup" };
+        return (mode >= 0 && mode < kModeCount) ? names[mode] : "?";
+    }
+
+    // df = (число групп) - 1 - (число оцениваемых параметров).
+    // Для AutoGroup число групп вычисляется по данным => kDfDynamic.
+    static int chiDf(int m, int mode, int numEstimated)
+    {
+        int cells = 0;
+        switch (mode) {
+        case 0: cells = m * m; break;            // NoneGroup
+        case 1: cells = 2 * (m - 1) + 1; break;  // MergeNonInformative
+        case 2: cells = m + 3; break;            // StandardGroup
+        case 4: cells = 3; break;                // ShrinkGroup
+        default: return kDfDynamic;              // AutoGroup
+        }
+        return cells - 1 - numEstimated;
+    }
+
+    static std::string dfStr(int m, int mode, int numEstimated)
+    {
+        const int df = chiDf(m, mode, numEstimated);
+        if (df == kDfDynamic) return "dynamic";
+        std::ostringstream os;
+        os << df;
+        return os.str();
+        return os.str();
+    }
+    static void noteMode(int mode)
+    {
+        if (mode != 4) return;
+        static bool noted = false;
+        if (noted) return;
+        noted = true;
+        std::cerr << "Внимание: режим 4 (Tsc::Grouping::ShrinkGroup) не даёт m*m "
+            << "состояний - библиотечная группировка строит sqrt(m*m) групп вместо "
+            << "числа ячеек m*m (ShrinkGroup.h, int len = sqrt(states.size())), "
+            << "поэтому после подгонки число групп перестаёт равняться m*m, "
+            << "и критерий для этого режима не определён.\n";
+    }
+
+
+    static void requireDf(int df)
+    {
+        if (df != kDfDynamic && df < 1) {
+            std::cerr << "df < 1 (" << df
+                << "): проверьте mode/m/numUnknown, параметры некорректны\n";
+            std::exit(1);
+        }
+    }
+
+    struct ChiResult {
+        double stat;      // X^2
+        double plevel;    // p-value
+        double minNPi;    // минимальное N*pi_ij
+        int df;
+        bool defined;     // false, если p-value не определено
+    };
+
+    // Критерий: группировка состояний и вычисление критерия на полученных группах.
+    // Значение X^2 и p-value считает TSCPlevel::CPLevel.
+    //
+    // df вычисляет библиотека: CPLevel::CalcChiValue(empiric) без df даёт
+    // df = (число групп) - 1; из неё вычитается число оцениваемых параметров,
+    // и получается df для расчёта p-value.
+    static ChiResult chiSquare(const Counts& counts, int N, const Params& par,
+        bool testModel1, int mode, int numEstimated)
+    {
+        ChiResult r;
+        r.stat = 0.0; r.plevel = 0.0; r.minNPi = 0.0; r.df = 0; r.defined = false;
+
+        const int m = par.m;
+        const std::vector<double> allProbs = jointProbs(par, testModel1);
+        if (allProbs.size() != static_cast<size_t>(m) * m) return r;
+
+        std::vector<double> theoretic, empiric;
+        theoretic.reserve(m * m);
+        empiric.reserve(m * m);
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < m; j++) {
+                theoretic.push_back(allProbs[i * m + j]);
+                empiric.push_back(static_cast<double>(counts[i][j]));
+            }
+        }
+
+        PLevel::CPLevel chi;   // CPLevel::Init задаёт стратегию, CalcChiValue считает X^2
+        try {
+            if (mode == 1) {
+                MergeNonInformative<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+            else if (mode == 2) {
+                Tsc::Grouping::StandardGroup<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+            else if (mode == 3) {
+                Tsc::Grouping::AutoGroup<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+            else if (mode == 4) {
+                Tsc::Grouping::ShrinkGroup<PLevel::uint, double> strategy;
+                // Ограничение: библиотечный ShrinkGroup объединяет состояния по sqrt(состояния)
+                // и настраивается один раз, но он всё равно даёт не m*m ячеек, а m, не m*m.
+                // Режим 4 всё равно бесполезен, даже если вручную выставить CPLevel::Init,
+                // число групп после этого не совпадает с числом ячеек критерия.
+                strategy.setSize(N);
+                strategy.setStates(theoretic);
+                strategy.setLevel(5.0);
+                strategy.setMinSize(1);
+                std::vector<PLevel::uint> shrink = strategy();
+                if (static_cast<int>(shrink.size()) != m * m) {
+                    static bool warned = false;
+                    if (!warned) {
+                        warned = true;
+                        std::cerr << "Внимание: Tsc::Grouping::ShrinkGroup для "
+                            << (m * m) << " состояний вернул " << shrink.size()
+                            << " групп (ожидалось sqrt(m*m)=" << m << ")."
+                            << " Режим 4 отключён.\n";
+                    }
+                    return r;
+                }
+                chi.Init(theoretic, N, strategy);
+            }
+            else {
+                Tsc::Grouping::NoneGroup<PLevel::uint, double> strategy;
+                chi.Init(theoretic, N, strategy);
+            }
+
+            // Первое вычисление: библиотека выдаёт df = (число групп) - 1.
+            chi.CalcChiValue(empiric, /*isCheckSize=*/false);
+            const int dfAll = chi.GetPLevelData().df;
+            const int df = dfAll - numEstimated;
+            r.df = df;
+            if (df < 1) return r;              // df < 1: критерий не определён
+
+            // Второе вычисление: df уже окончательный, считается p-value.
+            chi.CalcChiValue(empiric, df, /*isCheckSize=*/false);
+        }
+        catch (std::exception&) {
+            return r;               // df < 1 или нехватка данных
+        }
+
+        const PLevel::PLevelData& data = chi.GetPLevelData();
+        r.stat = data.criterion_value;
+        r.plevel = data.plevel;
+        r.minNPi = data.minNPi;
+        r.df = data.df;
+        r.defined = (data.plevel >= 0.0);
+        return r;
+    }
+
+    // ----------------------------------------------------------------------
+    // Эмпирический размер критерия при известных параметрах
+    // ----------------------------------------------------------------------
+
+    static bool modelIsValid(const Params& par, bool model1)
+    {
+        const std::vector<double> probs = jointProbs(par, model1);
+        if (probs.size() != static_cast<size_t>(par.m) * par.m) return false;
+        for (size_t k = 0; k < probs.size(); ++k)
+            if (!(probs[k] > 0.0)) return false;
+        return true;
+    }
+
+    struct RejRates { double simple; double onestep; };
+
+    // ...... ... ... ... .. ..... ...... ... alpha: H0 ...
+    // . ... ....... ....... ....... ... ... ... ......
+    // df ... ... ... ... ... ... ... ... ...... ...
+    // ... ... ... ... ... ... ... ... .. ... ... .. ... .. . .. ..
+    static RejRates empiricalRejectionRate(int N, int numTrials, const Params& par,
+        bool sampleFromModel1, bool testModel1, double alpha, std::mt19937& rng,
+        int numUnknown = 0, int mode = 0)
+    {
+        RejRates r; r.simple = 0.0; r.onestep = 0.0;
+        int rejS = 0, rejO = 0, total = 0;
+        const int numEstAll = numEstimatedFor(par.m, testModel1, numUnknown);
+        requireDf(chiDf(par.m, mode, numEstAll));
+        for (int t = 0; t < numTrials; t++) {
+            Counts counts = generateSample(N, par, sampleFromModel1, rng);
+            Est s, o;
+            if (!libraryEstimates(counts, N, par, testModel1, numUnknown, s, o)) continue;
+            total++;
+            Params ps = par, po = par;
+            ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
+            po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
+            if (modelIsValid(ps, testModel1)) {
+                ChiResult cr = chiSquare(counts, N, ps, testModel1, mode, numEstAll);
+                if (cr.defined && cr.plevel < alpha) rejS++;
+            }
+            if (modelIsValid(po, testModel1)) {
+                ChiResult cr = chiSquare(counts, N, po, testModel1, mode, numEstAll);
+                if (cr.defined && cr.plevel < alpha) rejO++;
+            }
+        }
+        if (total > 0) {
+            r.simple = static_cast<double>(rejS) / total;
+            r.onestep = static_cast<double>(rejO) / total;
+        }
+        return r;
+    }
+
+    // ----------------------------------------------------------------------
+    // Один эксперимент: генерация + оценки библиотекой
+    // ----------------------------------------------------------------------
+
+    static bool drawTrial(int N, const Params& genPar, bool genIsA,
+        const Params& testPar, bool testIsA, int k, std::mt19937& rng,
+        Counts& counts, Est& s, Est& o)
+    {
+        long seed = nextSeed(rng);
+        bool ok = genIsA
+            ? tscGenerate<TSCGenerator::CGenerator_1Pos>(genPar, N, seed, counts)
+            : tscGenerate<TSCGenerator::CGenerator_1Pos_mine>(genPar, N, seed, counts);
+        if (!ok) return false;
+        return libraryEstimates(counts, N, testPar, testIsA, k, s, o);
+    }
+
+    // ----------------------------------------------------------------------
+    // p-value при оценке параметров по выборке (H0 верна)
+    // ----------------------------------------------------------------------
+
+    struct EstPValues {
+        std::vector<double> simple, onestep;
+        double outSimple = 0.0, outOnestep = 0.0;   // доля оценок вне [0,1]
+        double badSimple = 0.0, badOnestep = 0.0;   // доля невырожденных случаев
+        int failed = 0;                             // ошибки TSC / оценок
+    };
+
+
+    static EstPValues collectPValuesEstimated(int N, int numTrials, const Params& par,
+        bool modelIsA, int numUnknown, std::mt19937& rng, int mode = 0)
+    {
+        EstPValues res;
+        res.simple.reserve(numTrials);
+        res.onestep.reserve(numTrials);
+        const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);
+        requireDf(chiDf(par.m, mode, numEstAll));
+        int os = 0, oo = 0, bs = 0, bo = 0, valid = 0;
+        for (int t = 0; t < numTrials; t++) {
+            Counts counts;
+            Est s, o;
+            if (!drawTrial(N, par, modelIsA, par, modelIsA, numUnknown, rng, counts, s, o)) {
+                res.failed++;
+                continue;
+            }
+            valid++;
+            if (s.outside) os++;
+            if (o.outside) oo++;
+            Params ps = par, po = par;  // p_i, p_ch, p_adv - ... ... ... ... ...
+            ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
+            po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
+            if (modelIsValid(ps, modelIsA)) {
+                ChiResult cr = chiSquare(counts, N, ps, modelIsA, mode, numEstAll);
+                res.simple.push_back(cr.defined ? cr.plevel : 0.0);
+                if (!cr.defined) bs++;
+            }
+            else { res.simple.push_back(0.0); bs++; }
+            if (modelIsValid(po, modelIsA)) {
+                ChiResult cr = chiSquare(counts, N, po, modelIsA, mode, numEstAll);
+                res.onestep.push_back(cr.defined ? cr.plevel : 0.0);
+                if (!cr.defined) bo++;
+            }
+            else { res.onestep.push_back(0.0); bo++; }
+        }
+        double denom = valid > 0 ? valid : 1;
+        res.outSimple = os / denom;
+        res.outOnestep = oo / denom;
+        res.badSimple = bs / denom;
+        res.badOnestep = bo / denom;
+        return res;
+    }
+
+    // ----------------------------------------------------------------------
+    // Выборка от sampleModelIsA с истинными (trueCh, trueAdv),
+    // проверка моделью testModelIsA ("оценка от другой модели")
+    // ----------------------------------------------------------------------
+
+    static EstPValues collectPValuesCrossModel(int N, int numTrials, Params par,
+        bool sampleModelIsA, double trueCh, double trueAdv,
+        bool testModelIsA, int numUnknown, std::mt19937& rng, int mode = 0)
+    {
+        EstPValues res;
+        res.simple.reserve(numTrials);
+        res.onestep.reserve(numTrials);
+        const int numEstAll = numEstimatedFor(par.m, testModelIsA, numUnknown);
+        requireDf(chiDf(par.m, mode, numEstAll));
+        int os = 0, oo = 0, bs = 0, bo = 0, valid = 0;
+        Params genPar = par;
+        genPar.p_ch = trueCh;
+        genPar.p_adv = trueAdv;
+        Params testPar = par;
+        testPar.p_adv = trueAdv;
+        testPar.p_ch = trueCh;   // numUnknown == 0: ... ... ... ... ... ...
+        for (int t = 0; t < numTrials; t++) {
+            Counts counts;
+            Est s, o;
+            if (!drawTrial(N, genPar, sampleModelIsA, testPar, testModelIsA, numUnknown, rng, counts, s, o)) {
+                res.failed++;
+                continue;
+            }
+            valid++;
+            if (s.outside) os++;
+            if (o.outside) oo++;
+            Params ps = testPar, po = testPar;
+            ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
+            po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
+            if (modelIsValid(ps, testModelIsA)) {
+                ChiResult cr = chiSquare(counts, N, ps, testModelIsA, mode, numEstAll);
+                res.simple.push_back(cr.defined ? cr.plevel : 0.0);
+                if (!cr.defined) bs++;
+            }
+            else { res.simple.push_back(0.0); bs++; }
+            if (modelIsValid(po, testModelIsA)) {
+                ChiResult cr = chiSquare(counts, N, po, testModelIsA, mode, numEstAll);
+                res.onestep.push_back(cr.defined ? cr.plevel : 0.0);
+                if (!cr.defined) bo++;
+            }
+            else { res.onestep.push_back(0.0); bo++; }
+        }
+        double denom = valid > 0 ? valid : 1;
+        res.outSimple = os / denom;
+        res.outOnestep = oo / denom;
+        res.badSimple = bs / denom;
+        res.badOnestep = bo / denom;
+        return res;
+    }
+
+    static void writePValuesCsv(const std::string& path, const std::vector<double>& pvals)
+    {
+        std::ofstream out(path.c_str());
+        out << "pvalue\n";
+        for (size_t i = 0; i < pvals.size(); ++i) out << pvals[i] << "\n";
+    }
+
+    static double rejectionRate(const std::vector<double>& pv, double alpha)
+    {
+        if (pv.empty()) return 0.0;
+        int c = 0;
+        for (size_t i = 0; i < pv.size(); ++i) if (pv[i] < alpha) c++;
+        return static_cast<double>(c) / pv.size();
+    }
+
+    static void printRejectionTable(const std::string& name, const std::vector<double>& pv)
+    {
+        static const double alphas[6] = { 0.01, 0.02, 0.03, 0.04, 0.05, 0.10 };
+        std::cout << std::setw(10) << name << " | ";
+        for (int i = 0; i < 6; ++i)
+            std::cout << std::fixed << std::setprecision(3) << rejectionRate(pv, alphas[i]) << "  ";
+        std::cout << "\n";
+    }
+
+    static void printPowerTable(double padv, double pch, const std::vector<double>& pv)
+    {
+        static const double alphas[6] = { 0.01, 0.02, 0.03, 0.04, 0.05, 0.10 };
+        std::cout << "модель: p_adv = " << padv << ", p_ch = " << pch
+            << ", p_adv*(1-p_ch) = " << padv * (1.0 - pch) << "\n";
+        std::cout << "  доля отклонений        | ";
+        for (int i = 0; i < 6; ++i)
+            std::cout << std::fixed << std::setprecision(3) << rejectionRate(pv, alphas[i]) << "  ";
+        std::cout << "\n  уровень значимости a  | ";
+        for (int i = 0; i < 6; ++i)
+            std::cout << std::fixed << std::setprecision(2) << alphas[i] << "   ";
+        std::cout << "\n\n";
+    }
+
+    // ----------------------------------------------------------------------
+    // Мощность в зависимости от p_i
+    // ----------------------------------------------------------------------
+
+    static double lowerQuantile(std::vector<double> v, double q)
+    {
+        std::sort(v.begin(), v.end());
+        size_t idx = static_cast<size_t>(std::floor(q * v.size()));
+        if (idx >= v.size()) idx = v.size() - 1;
+        return v[idx];
+    }
+
+    static void powerVsP(const Params& par0, const std::vector<std::vector<double> >& pGrid,
+        const std::vector<int>& modes, int N, int trials, double alpha,
+        int numUnknownAlt, double pch, double padv, std::mt19937& rng,
+        const std::string& csvPath)
+    {
+        std::ofstream csv(csvPath.c_str());
+        csv << "mode,p,power\n";
+        std::cout << "\n########## Мощность в зависимости от p_i ##########\n";
+        std::cout << "N = " << N << ", повторов = " << trials << ", alpha = " << alpha
+            << ", p_ch = " << pch << ", p_adv = " << padv
+            << ", оцениваемых параметров: " << numUnknownAlt << "\n";
+
+        for (size_t mi = 0; mi < modes.size(); ++mi) {
+            int mode = modes[mi];
+            noteMode(mode);
+            std::cout << "\n--- режим: " << modeName(mode)
+                << ", df = " << dfStr(par0.m, mode, numEstimatedFor(par0.m, true, numUnknownAlt)) << " ---\n";
+            std::cout << std::setw(24) << "p" << " |  power\n";
+            for (size_t gi = 0; gi < pGrid.size(); ++gi) {
+                const std::vector<double>& praw = pGrid[gi];
+                Params par = par0;
+                par.m = static_cast<int>(praw.size());
+                par.p = praw;
+                double sp = std::accumulate(par.p.begin(), par.p.end(), 0.0);
+                for (size_t k = 0; k < par.p.size(); ++k) par.p[k] /= sp;
+                par.p_ch = pch; par.p_adv = padv;
+
+                std::string label;
+                for (size_t i = 0; i < par.p.size(); i++) {
+                    std::ostringstream os;
+                    os << std::fixed << std::setprecision(2) << par.p[i];
+                    label += (i ? "/" : "") + os.str();
+                }
+
+                const int dfHere = chiDf(par.m, mode, numEstimatedFor(par.m, true, numUnknownAlt));
+                if (dfHere != kDfDynamic && dfHere < 1) {
+                    std::cout << std::setw(24) << label << " | df < 1, пропуск\n";
+                    continue;
+                }
+
+                EstPValues h1 = collectPValuesCrossModel(N, trials, par, true, pch, padv,
+                    false, numUnknownAlt, rng, mode);
+                if (h1.onestep.empty()) {
+                    std::cout << std::setw(24) << label << " | нет пригодных выборок TSC\n";
+                    continue;
+                }
+                double power = rejectionRate(h1.onestep, alpha);
+
+                std::cout << std::setw(24) << label << " | " << std::fixed << std::setprecision(3)
+                    << power << "\n";
+                csv << mode << "," << label << "," << power << "\n";
+            }
+        }
+        std::cout << "\nРезультаты записаны в " << csvPath << "\n\n";
+    }
+
+    // ----------------------------------------------------------------------
+    // Проверка согласованности TSC: суммы строк и столбцов
+    // ----------------------------------------------------------------------
+
+    static void sanityCheckTsc(const Params& par, int N, std::mt19937& rng)
+    {
+        int m = par.m;
+        g_printTscHeader = true;
+        for (int w = 0; w < 2; ++w) {
+            bool isA = (w == 0);
+            Counts c = generateSample(N, par, isA, rng);
+            std::vector<double> pr = jointProbs(par, isA);
+            std::cout << "Проверка выборки TSC, модель " << (isA ? "А" : "Б")
+                << " (g_transposeSample = " << (g_transposeSample ? "true" : "false") << "):\n";
+            for (int i = 0; i < m; i++) {
+                for (int j = 0; j < m; j++) std::cout << std::setw(8) << c[i][j];
+                std::cout << "\n";
+            }
+            std::cout << "  строки  (набл. | теор.):";
+            for (int i = 0; i < m; i++) {
+                double o = 0.0, e = 0.0;
+                for (int j = 0; j < m; j++) { o += c[i][j]; e += pr[i * m + j]; }
+                std::cout << "  " << std::fixed << std::setprecision(3) << o / N << "|" << e;
+            }
+            std::cout << "\n  столбцы (набл. | теор.):";
+            for (int j = 0; j < m; j++) {
+                double o = 0.0, e = 0.0;
+                for (int i = 0; i < m; i++) { o += c[i][j]; e += pr[i * m + j]; }
+                std::cout << "  " << std::fixed << std::setprecision(3) << o / N << "|" << e;
+            }
+            std::cout << "\n\n";
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Работа с файлом
+    // ----------------------------------------------------------------------
+
+    static std::string exeDir()
+    {
+#if defined(_WIN32)
+        char buf[MAX_PATH];
+        DWORD n = GetModuleFileNameA(NULL, buf, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::string s(buf, n);
+            size_t k = s.find_last_of("\\/");
+            if (k != std::string::npos) return s.substr(0, k + 1);
+        }
+#endif
+        return std::string();
+    }
+
+    static bool readCountsFile(const std::string& path, Counts& counts, int& m)
+    {
+        std::ifstream in(path.c_str());
+        if (!in) {
+            std::string alt = exeDir() + path;
+            in.clear();
+            in.open(alt.c_str());
+        }
+        if (!in) { std::cerr << "Не удалось открыть файл частот: " << path << "\n"; return false; }
+        std::vector<std::vector<double> > rows;
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream ls(line);
+            std::vector<double> r; double v;
+            while (ls >> v) r.push_back(v);
+            if (!r.empty()) rows.push_back(r);
+        }
+        int n = static_cast<int>(rows.size());
+        if (n < 2) { std::cerr << "В файле меньше двух непустых строк\n"; return false; }
+        for (int i = 0; i < n; ++i)
+            if (static_cast<int>(rows[i].size()) != n) {
+                std::cerr << "Число строк не совпадает: строк " << n
+                    << ", в строке " << (i + 1) << " чисел " << rows[i].size() << "\n";
+                return false;
+            }
+        m = n;
+        counts.assign(m, std::vector<int>(m, 0));
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < m; ++j) {
+                if (rows[i][j] < 0.0) {
+                    std::cerr << "Отрицательная частота в ячейке (" << i << "," << j << ")\n";
+                    return false;
+                }
+                counts[i][j] = static_cast<int>(std::floor(rows[i][j] + 0.5));
+            }
+        return true;
+    }
+
+
+    static void fileSampleCriterion(const std::string& path, const Params& base,
+        const std::vector<int>& modes, int numUnknown, bool testIsA, double alpha)
+    {
+        Counts counts;
+        int m = 0;
+        if (!readCountsFile(path, counts, m)) return;
+
+        long total = 0;
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < m; ++j) total += counts[i][j];
+        if (total <= 0) { std::cerr << "Нет данных: сумма частот равна нулю\n"; return; }
+        int N = 300;                // sample size
+
+        std::cout << "==================================================\n";
+        std::cout << "Проверка по файлу " << path << ": m = " << m << ", N = " << N
+            << ", модель " << (testIsA ? "А" : "Б")
+            << ", оцениваемых параметров: " << numUnknown << "\n";
+        for (int i = 0; i < m; ++i) {
+            for (int j = 0; j < m; ++j) std::cout << std::setw(8) << counts[i][j];
+            std::cout << "\n";
+        }
+        std::cout << "  суммы по строкам:";
+        for (int i = 0; i < m; ++i) {
+            long r = 0;
+            for (int j = 0; j < m; ++j) r += counts[i][j];
+            std::cout << std::setw(9) << r;
+        }
+        std::cout << "\n\n";
+
+        Params testPar = base;
+        testPar.m = m;
+        Est es, eo;
+        g_printTscHeader = true;
+        if (!libraryEstimates(counts, N, testPar, testIsA, numUnknown, es, eo)) {
+            std::cerr << ".. ....... ........ ...... TSC\n";
+            return;
+        }
+        Params ps = testPar, po = testPar;
+        ps.p = es.p; ps.p_ch = es.p_ch; ps.p_adv = es.p_adv;
+        po.p = eo.p; po.p_ch = eo.p_ch; po.p_adv = eo.p_adv;
+        std::cout << "...... TSC (....... / .........):\n";
+        for (int i = 0; i + 1 < m; ++i)
+            std::cout << "  p" << i << " = " << std::fixed << std::setprecision(4)
+                << ps.p[i] << " / " << po.p[i] << "\n";
+        std::cout << "  pch = " << ps.p_ch << " / " << po.p_ch << "\n";
+        std::cout << "  padv = " << ps.p_adv << " / " << po.p_adv << "\n\n";
+        const char* names[2] = { "simple  ", "one-step" };
+        Params used[2];
+        used[0] = ps;
+        used[1] = po;
+        for (size_t mi = 0; mi < modes.size(); ++mi) {
+            int mode = modes[mi];
+            noteMode(mode);
+            const int numEstAll = numEstimatedFor(m, testIsA, numUnknown);
+            std::cout << "==================================================\n";
+            std::cout << "...........: " << modeName(mode) << ", df = "
+                << dfStr(m, mode, numEstAll) << " (... .. " << numEstAll << " ... ... ... ...)\n";
+            std::cout << "==================================================\n";
+            {
+                const int dfCheck = chiDf(m, mode, numEstAll);
+                if (dfCheck != kDfDynamic && dfCheck < 1) {
+                    std::cout << "df < 1: ...... ........\n\n";
+                    continue;
+                }
+            }
+            for (int k = 0; k < 2; ++k) {
+                if (!modelIsValid(used[k], testIsA)) {
+                    std::cout << "  " << names[k]
+                        << " ...... .........: ............. ..........., p-value .. ...........\n";
+                    continue;
+                }
+                ChiResult cr = chiSquare(counts, N, used[k], testIsA, mode, numEstAll);
+                if (!cr.defined) {
+                    std::cout << "  " << names[k]
+                        << " критерий не применён: p-value не вычислен\n";
+                    continue;
+                }
+                std::cout << "  " << names[k] << " chi2 = " << std::fixed
+                    << std::setprecision(4) << cr.stat
+                    << ", p-value = " << std::setprecision(6) << cr.plevel
+                    << ", alpha = " << std::setprecision(3) << alpha
+                    << " -> " << (cr.plevel < alpha ? "отклоняем H0" : "не отклоняем H0") << "\n";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Основной сценарий
+    // ----------------------------------------------------------------------
+
+    static int run()
+    {
+        setlocale(LC_ALL, "C");
+#if defined(_WIN32)
+        {
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD dwMode = 0;
+            if (hOut != INVALID_HANDLE_VALUE && hOut != NULL && GetConsoleMode(hOut, &dwMode))
+                SetConsoleOutputCP(1251);
+        }
+#endif
+        // PLevel::CPLevel обращается к дамперу, поэтому он должен быть создан.
+        initDumper();
+
+        // ---------------- настройки: как в nw.cpp ----------------
+        Params par;
+        par.m = 6;
+        par.p_ch = 0.2;
+        par.p_adv = 0.05;
+        par.p.clear();
+        //par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // p_i
+        for (int i = 0; i < 6; ++i)
+            par.p.push_back(1);
+        int N = 300;                // sample size
+        int numTrials = 1000;        // Monte Carlo trials
+        double alpha = 0.1;          // уровень значимости
+        bool modelIsA = true;        // true: модель А
+        int numUnknown = 2;          // numUnknown
+        int numUnknownAlt = 2;       // для power (0 или 1; 2 не проверяется)
+        bool fixedSeed = false;      // true: воспроизводимые генерации
+        bool sanityCheck = false;      // при отладке печатает подробные проверки (число состояний в 1 таблице, их в 2 таблицах)
+        g_transposeSample = false;   // true, если категории TSC заданы наоборот
+        std::vector<int> modes;
+        modes.push_back(0);
+        //modes.push_back(1); тоже был признан некорректным (объединение неинформативных ячеек, не соответствующее критерию):(
+        modes.push_back(2);
+        modes.push_back(3);
+        // modes.push_back(4);   // ShrinkGroup: не реализовано здесь, но в критерии тоже бесполезно
+        // --- ........ .. ..... ...... ---
+        bool checkFileSample = false;         // true: проверить файл
+        bool onlyFileSample = false;         // true: только файл
+        std::string fileSamplePath = "DES95765Group.txt";
+        // --- мощность в зависимости от p_i ---
+        bool runPowerStudy = false;          // true: выполнить study
+        bool onlyPowerStudy = false;         // true: только мощность
+        int psN = 300;
+        int psTrials = 1000;
+        double psAlpha = 0.05;
+        int psUnknown = 0;
+        double psPch = 0.2, psPadv = 0.05;
+        std::vector<std::vector<double> > pGrid;
+        const double p0s[7] = { 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8 };
+        for (int k = 0; k < 7; ++k) {
+            double p0 = p0s[k];
+            std::vector<double> v;
+            v.push_back(p0); v.push_back((1.0 - p0) * 0.6); v.push_back((1.0 - p0) * 0.4);
+            pGrid.push_back(v);
+        }
+        const double ss[5] = { 0.5, 0.6, 0.7, 0.8, 0.9 };
+        for (int k = 0; k < 5; ++k) {
+            std::vector<double> v;
+            v.push_back(0.5); v.push_back(0.5 * ss[k]); v.push_back(0.5 * (1.0 - ss[k]));
+            pGrid.push_back(v);
+        }
+        // ------------------------------------------------------------
+        if (sanityCheck) { return 0; }
+
+        if (numUnknown < 0 || numUnknown > 2 || numUnknownAlt < 0 || numUnknownAlt > 2) {
+            std::cerr << "numUnknown и numUnknownAlt должны быть 0, 1 или 2\n";
+            return 1;
+        }
+
+        double sumP = std::accumulate(par.p.begin(), par.p.end(), 0.0);
+        for (size_t k = 0; k < par.p.size(); ++k) par.p[k] /= sumP;
+
+        std::mt19937 rng(fixedSeed ? 12345u : std::random_device()());
+
+        std::cout << "m = " << par.m << ", p_ch = " << par.p_ch << ", p_adv = " << par.p_adv
+            << ", N = " << N << ", numTrials = " << numTrials << "\n";
+        std::cout << "модель H0: модель " << (modelIsA ? "А" : "Б")
+            << ", оцениваемых параметров: " << numUnknown << "\n\n";
+        // df, ... ... ... ... ... ... TSCCalc (model.cpp:268):
+        //   df = StatesCount - NANParamCount - 1
+        const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);
+
+
+        if (sanityCheck) sanityCheckTsc(par, N, rng);
+        if (checkFileSample) {
+            fileSampleCriterion(fileSamplePath, par, modes, numUnknown, modelIsA, alpha);
+            if (onlyFileSample) return 0;
+        }
+
+        // --- теоретические частоты (проверка условия N*p_ij >= 5) ---
+        {
+            std::vector<double> pr = jointProbs(par, modelIsA);
+            int nSmall = 0;
+            double restMass = 0.0;
+            std::cout << "Ожидаемые частоты N*p_ij:\n";
+            for (int i = 0; i < par.m; i++) {
+                for (int j = 0; j < par.m; j++) {
+                    double e = N * pr[i * par.m + j];
+                    if (e < 5.0) nSmall++;
+                    if (!isInformative(i, j)) restMass += pr[i * par.m + j];
+                    std::cout << std::setw(9) << std::fixed << std::setprecision(1) << e;
+                }
+                std::cout << "\n";
+            }
+            std::cout << "ячеек с N*p_ij < 5: " << nSmall << "\n";
+            std::cout << "неинформативная часть при H0 (pi_rest): "
+                << std::setprecision(3) << restMass << "\n\n";
+        }
+
+        if (runPowerStudy) {
+            if (psUnknown < 0 || psUnknown > 2) {
+                std::cerr << "psUnknown должен быть 0, 1 или 2\n"; return 1;
+            }
+            powerVsP(par, pGrid, modes, psN, psTrials, psAlpha, psUnknown, psPch, psPadv, rng,
+                "power_vs_p.csv");
+            if (onlyPowerStudy) return 0;
+        }
+
+        // --- эмпирические размеры критерия ---
+        for (size_t mi = 0; mi < modes.size(); ++mi) {
+            int mode = modes[mi];
+            noteMode(mode);
+            {
+                const int dfCheck = chiDf(par.m, mode, numEstAll);
+                if (dfCheck != kDfDynamic && dfCheck < 1) {
+                    std::cout << "==================================================\n";
+                    std::cout << ".....: " << modeName(mode) << ", df = " << dfCheck
+                        << " (< 1): ... .. " << numEstAll
+                        << " ... ... ... ... ... ... ......\n";
+                    std::cout << "==================================================\n\n";
+                    continue;
+                }
+            }
+            std::cout << "==================================================\n";
+            std::cout << "Режим: " << modeName(mode)
+                << ", df (расчётный) = " << dfStr(par.m, mode, numEstAll) << "\n";
+            std::cout << "==================================================\n\n";
+
+            RejRates typeI = empiricalRejectionRate(N, numTrials, par, modelIsA, modelIsA, alpha, rng, numUnknown, mode);
+            RejRates power = empiricalRejectionRate(N, numTrials, par, modelIsA, !modelIsA, alpha, rng, numUnknown, mode);
+            std::cout << "............ ......., alpha = " << alpha << ":\n";
+            std::cout << "  ...... ........ (H0 .....): simple = " << typeI.simple
+                << ", one-step = " << typeI.onestep << "\n";
+            std::cout << "  ........ ... H0 .......: simple = " << power.simple
+                << ", one-step = " << power.onestep << "\n\n";
+
+            std::ostringstream modeStr;
+            modeStr << mode;
+            EstPValues pv = collectPValuesEstimated(N, numTrials, par, modelIsA, numUnknown, rng, mode);
+            writePValuesCsv("pvalues_simple_mode" + modeStr.str() + ".csv", pv.simple);
+            writePValuesCsv("pvalues_onestep_mode" + modeStr.str() + ".csv", pv.onestep);
+            std::cout << "Размер критерия при H0 (df = " << dfStr(par.m, mode, numEstAll) << "):\n";
+            std::cout << "     alpha | 0.010  0.020  0.030  0.040  0.050  0.100\n";
+            printRejectionTable("simple", pv.simple);
+            printRejectionTable("one-step", pv.onestep);
+            std::cout << "оценок вне [0,1]: simple = "
+                << pv.outSimple << ", one-step = " << pv.outOnestep << "\n";
+            std::cout << "вырожденных случаев (pi_ij <= 0, p-value:=0): simple = "
+                << pv.badSimple << ", one-step = " << pv.badOnestep << "\n";
+            if (pv.failed > 0) std::cout << "не удалось получить оценки TSC: " << pv.failed << "\n";
+            std::cout << "p-value записаны в pvalues_simple_mode" << mode
+                << ".csv и pvalues_onestep_mode" << mode << ".csv\n\n";
+
+            // Оценка от другой модели (мощность)
+            {
+                std::cout << "--- оценка от другой модели, оцениваемых параметров: "
+                    << numUnknownAlt << " (" << modeName(mode) << ") ---\n";
+                int powN = 300;
+                int powTrials = 1000;
+                const int dfHere = chiDf(par.m, mode, numEstimatedFor(par.m, modelIsA, numUnknownAlt));
+                if (dfHere != kDfDynamic && dfHere < 1) {
+                    std::cout << "df < 1, пропуск\n\n";
+                    continue;
+                }
+                std::vector<std::pair<double, double> > grid;
+                //grid.push_back(std::make_pair(0.4, 0.6));
+                grid.push_back(std::make_pair(0.05, 0.2));
+                //grid.push_back(std::make_pair(0.2, 0.8));
+                //grid.push_back(std::make_pair(0.1, 0.9));
+                for (size_t gi = 0; gi < grid.size(); ++gi) {
+                    double padv = grid[gi].first, pch = grid[gi].second;
+                    EstPValues cross = collectPValuesCrossModel(powN, powTrials, par,
+                        /*sampleModelIsA=*/true, pch, padv,
+                        /*testModelIsA=*/false, numUnknownAlt, rng, mode);
+                    std::cout << "-- оценка one-step --\n";
+                    printPowerTable(padv, pch, cross.onestep);
+                    std::cout << "-- оценка простая --\n";
+                    printPowerTable(padv, pch, cross.simple);
+                    std::cout << "оценок вне [0,1]: simple=" << cross.outSimple
+                        << ", one-step=" << cross.outOnestep
+                        << "; вырожденных: simple=" << cross.badSimple
+                        << ", one-step=" << cross.badOnestep;
+                    if (cross.failed > 0) std::cout << "; ошибок TSC: " << cross.failed;
+                    std::cout << "\n\n";
+                }
+            }
+        }
+        return 0;
+    }
+
+} // namespace chi2test
+
+int main()
+{
+    return chi2test::run();
+}
