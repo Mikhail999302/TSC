@@ -1,4 +1,18 @@
-
+// nw1.cpp - вариант nw.cpp, в котором вся математика считается библиотекой.
+//
+// Ручные формулы pi_ij, оценки p_ch/p_adv и критерий из nw.cpp удалены.
+// Теперь:
+//   * p(xi_1=i, xi_2=j) = p_i * pi_ij считает TSCCalc (CTSCModel_1Pos /
+//     CTSCModel_1Pos_mine): формулы состояний читаются через
+//     DataProcessing::ReadExpressions и вычисляются как CExpression::Eval();
+//   * оценки p_ch и p_adv считает ECalc: CalcSimpleEstimates (простые
+//     оценки) и CalcEnhancedEstimates (усиленные оценки);
+//   * генерация выборки - TSCGenerator (CGenerator_1Pos / CGenerator_1Pos_mine);
+//   * X^2 и p-value - TSCPlevel::CPLevel (все три режима группировки).
+//
+// Локально остаются только разбор файла, печать, сборка параметров
+// (известные p_i и p_adv), стратегия группировки (только номера групп)
+// и подсчёт df.
 
 #include <windows.h>
 #include <algorithm>
@@ -43,13 +57,11 @@ namespace chi2test {
         std::vector<double> p;  // p_i = P(xi_1 = i), p[m-1] = 1 - sum(p_i)
         double p_ch;
         double p_adv;
-        bool outside;  // true, если вне [0, 1]
+        bool outside;  // true, .... .... .. .... ...... ... [0, 1]
     };
 
-    // Лежит ли v вне интервала
     static bool outside01(double v) { return v < 0.0 || v > 1.0; }
 
-    // Есть ли среди оценённых параметров значение вне (0, 1)?
     static bool outsideEst(const Est& e)
     {
         bool bad = outside01(e.p_ch) || outside01(e.p_adv);
@@ -57,7 +69,8 @@ namespace chi2test {
             if (outside01(e.p[i])) bad = true;
         return bad;
     }
-    //небольшой чек оценки
+    // ..... ...... TSC -> .........: [p_0 ... p_{m-2}, p_ch, p_adv].
+    // ... ... ..... ... . p_i (p_{m-1} = 1 - sum), p_ch . p_adv.
     static void estFromTsc(const std::vector<double>& all, int m, Est& e)
     {
         if (static_cast<int>(all.size()) < m + 1) { e.outside = true; return; }
@@ -74,9 +87,17 @@ namespace chi2test {
     static bool g_transposeSample = false;
     static int g_tscFailed = 0;
 
+    // ----------------------------------------------------------------------
+    // Модель TSC из библиотек TSCCalc + ECalc.
+    //
+    // Параметры в MathCalc адресуются глобально по именам ("pch", "padv",
+    // "p0", ...), поэтому каждому экземпляру модели выделяется своя карта
+    // параметров (AddMap/SelectMap/RemoveMap). Хранилище карт - std::list,
+    // поэтому указатели действительны и при нескольких живых моделях.
+    // Перед вычислением состояний или оценок модель выбирает свою карту.
+    // ----------------------------------------------------------------------
     static bool g_printTscHeader = false;
 
-    //удобно чтобы брать модель из TSC
     class TscModel
     {
     public:
@@ -121,7 +142,7 @@ namespace chi2test {
                 }
 
                 // Кэшеры строят символические выражения l_dot и InfoMatrix
-                // при первом обращении, поэтому начальные значения
+                // при первом обращении, поэтому начальные значения в карте
                 // должны быть корректными.
                 m_paramInfos = MathModels::CMathParameterInfos(m_se);
 
@@ -139,7 +160,12 @@ namespace chi2test {
                 m_model->Init(m_states, m_paramInfos, m_comp,
                     m_ldot, m_info, MathModels::CMathOperationIndicator(),
                     /*_isCalcInfoMatrix=*/true, /*_isBMatrix=*/false);
-
+                // Совпадение имён параметров с картой: перед первым расчётом
+                // библиотека строит символьные выражения (CalcSimpleEstimates)
+                // при первом обращении, поэтому начальные значения в карте
+                // по значениям из карты, поэтому значения в карте
+                // должны совпадать с теми, что передаются в оценку.
+                // CalcFrequencies -> SetContextValues().
                 {
                     m_dummy.assign(static_cast<size_t>(m) * m, 1.0);
                     m_dummyN = m * m;
@@ -165,13 +191,24 @@ namespace chi2test {
             MathCalc::MathContext::RemoveMap(m_mapId);
         }
 
-        // Размерность m, для которой собрана модель.
         int dim() const { return m_m; }
         // ... ... ... ....... df, ... TSCCalc (model.cpp:268):
         //   df = GetStatesCount() - GetNANParametersCount() - 1
+        int libraryStatesCount() const { return m_model->GetStatesCount(); }
         int libraryParamCount() const { return m_model->GetNANParametersCount(); }
 
-        //в библиотеке куча try catch поэтому возвращает bool, а так это для подсчета оценок
+        // p(xi_1 = i, xi_2 = j) = p_i * pi_ij, раскладка [i*m + j].
+        // Теоретические вероятности состояний: CBaseDiscreteModel::CalcFrequencies
+        // (при n = 1 библиотека возвращает произведения p_i * pi_ij). Значения p_i и
+        // p_ch/p_adv передаются явно в CMathParameterValues, остальное берётся из выражений.
+        // p(xi_1 = i, xi_2 = j) = p_i * pi_ij, раскладка [i*m + j].
+        // Теоретические вероятности состояний: CBaseDiscreteModel::CalcFrequencies
+        // (при n = 1 библиотека возвращает произведения p_i * pi_ij).
+        // Первый аргумент counts нужен библиотеке только для построения оценок,
+        // значения параметров в CMathParameterValues задаются явно, поэтому
+        // итог от CalcSimpleEstimates не влияет на результат: частоты считает
+        // только CalcFrequencies по переданным значениям параметров.
+        // Пустые (нулевые) частоты для вероятностей не нужны, но длина должна совпадать.
         bool jointProbs(const std::vector<double>& counts, int n,
             const std::vector<double>& p, double pCh, double pAdv,
             std::vector<double>& probs) const
@@ -193,14 +230,19 @@ namespace chi2test {
             return m_model->CalcFrequencies(est, 1, probs);
         }
 
-        //перестраховка
+        // Версия без выборки: подставляет фиктивные counts (все единицы),
+        // потому что для вероятностей нужны только параметры, а не частоты ячеек.
         bool jointProbs(const std::vector<double>& p, double pCh, double pAdv,
             std::vector<double>& probs) const
         {
             return jointProbs(m_dummy, m_dummyN, p, pCh, pAdv, probs);
         }
 
-        //тоже для оценок
+        // Оценки библиотекой по таблице частот counts (раскладка [i*m + j]).
+        // counts - исходные частоты (не нормированные), N - их сумма.
+        // Возвращает полные наборы из m+1 параметров:
+        // simple = [p_0 ... p_{m-2}, p_ch, p_adv] из CalcSimpleEstimates,
+        // onestep - то же из CalcEnhancedEstimates.
         bool estimates(const std::vector<double>& counts, int N,
             std::vector<double>& simple, std::vector<double>& onestep) const
         {
@@ -218,7 +260,8 @@ namespace chi2test {
             simple.assign(n, 0.0);
             for (size_t i = 0; i < n; ++i) simple[i] = est[i].Value;
 
-           
+            // CalcEnhancedEstimates повторяет простой шаг и добавляет
+            // усиление Фишера; Gamma = 0 отключает доверительные интервалы.
             if (!m_model->CalcEnhancedEstimates(counts, N, m_se, est, 0.0)) return false;
             if (est.size() != n) return false;
             onestep.assign(n, 0.0);
@@ -235,7 +278,8 @@ namespace chi2test {
         MathCalc::MathContext::MapIDType m_mapId;
         MathModels::CCacherComparingStruct m_comp;
 
-
+        // Порядок объявления важен: m_rep хранит ссылки на кэшеры,
+        // поэтому при разрушении он должен умереть раньше них.
         MathModels::TLDotCacher m_ldot;
         MathModels::TInfoCacher m_info;
         std::auto_ptr<GroupedTSC::IModelRep> m_rep;
@@ -251,7 +295,6 @@ namespace chi2test {
     static std::auto_ptr<TscModel> g_modelA;
     static std::auto_ptr<TscModel> g_modelB;
 
-    // Обёртка над моделью TSCCalc для m и признака model1 (А = true, Б = false).
     static TscModel& theModel(int m, bool isA)
     {
         std::auto_ptr<TscModel>& slot = isA ? g_modelA : g_modelB;
@@ -272,8 +315,9 @@ namespace chi2test {
         return probs;
     }
 
-
+    // ----------------------------------------------------------------------
     // Генерация TSC: библиотека
+    // ----------------------------------------------------------------------
 
     // Параметры генератора: p_0..p_{m-1}, p_ch, p_adv
     static TSCGenerator::doubles makeDistrib(const Params& par)
@@ -332,13 +376,11 @@ namespace chi2test {
         }
     }
 
-    // Следующий seed для генератора
     static long nextSeed(std::mt19937& rng)
     {
         return static_cast<long>(rng() & 0x7fffffffu);
     }
 
-    // Генерирует таблицу частот размера N для заданной модели.
     static Counts generateSample(int N, const Params& par, bool fromModel1, std::mt19937& rng)
     {
         Counts counts;
@@ -360,10 +402,32 @@ namespace chi2test {
         return flat;
     }
 
-    //это то самое место где пришлось реализовать оценки p_i
+    // ----------------------------------------------------------------------
+    // ......: ...... ..........
+    // ----------------------------------------------------------------------
+    //   numUnknown == 0: ...... ... p_i (p_0..p_{m-2}); p_ch . p_adv ... ...
+    //   numUnknown == 1: ...... ... p_i . p_ch; p_adv ... ...
+    //   numUnknown == 2: ...... ... p_i, p_ch . p_adv
+    //   p_i ...... ... CalcSimpleEstimates / CalcEnhancedEstimates
+    //   (p_i MLE - . . . . .. .); p_ch . p_adv ... . .. . .. ..
+    // testPar - ......... ........... ...... .
+    // ----------------------------------------------------------------------
+    // ----------------------------------------------------------------------
+    // MLE of p_0..p_{m-2} with p_ch and p_adv known (numUnknown == 0).
+    //
+    // Model: q(i,k) = p_i * c(i,k), kernel
+    //     c(i,k) = a*p_k + b*[k==0] + d*[k==i]
+    // (a,b,d) = ((1-padv)*pch, padv, (1-padv)*(1-pch))  for model A,
+    //           (pch*(1-padv), pch*padv, 1-pch)          for model B.
+    //
+    // Row sums (CalcSimpleEstimates) are NOT the MLE here: the kernel depends on
+    // the same p, so p enters q twice.  With p_ch, p_adv fixed the log-likelihood
+    // is strictly concave in p, so  d(logL)/dp = 0  has one interior root, found by
+    // Newton's method (in p-coordinates the Hessian is diagonal, -H = diag(D) +
+    // D_{m-1}*11', inverted in closed form).
+    // ----------------------------------------------------------------------
     struct KernelABC { double a, b, d; };
 
-    // Параметры ядра p(xi_2 = j | xi_1 = i): a, b = p_ch, d = p_adv.
     static KernelABC kernelABC(bool model1, double p_ch, double p_adv)
     {
         KernelABC k;
@@ -380,7 +444,6 @@ namespace chi2test {
         return k;
     }
 
-    // Логарифм правдоподобия 
     static double logLik(const Counts& counts, const std::vector<double>& r, int m,
         const KernelABC& k, const std::vector<double>& p)
     {
@@ -398,7 +461,6 @@ namespace chi2test {
         return L;
     }
 
-    // Шаг Ньютона
     static bool newtonP(const Counts& counts, int N, int m, bool model1,
         double p_ch, double p_adv, std::vector<double>& p, int maxIter)
     {
@@ -432,6 +494,7 @@ namespace chi2test {
                 wg += w[t] * g[t];
             }
             if (bad) break;
+            // Newton:  p <- p + (-H)^-1 * g,   -H = diag(D[0..f-1]) + D[m-1]*11'
             const double den = 1.0 + D[m - 1] * S;
             if (den <= 0.0) break;
             const double c0 = D[m - 1] / den;
@@ -468,7 +531,6 @@ namespace chi2test {
         return true;
     }
 
-    // Оценки TSC из библиотеки (simple и one-step); известные p_ch/p_adv подставляются по numUnknown.
     static bool libraryEstimates(const Counts& counts, int N, const Params& testPar,
         bool testIsA, int numUnknown, Est& s, Est& o)
     {
@@ -492,16 +554,21 @@ namespace chi2test {
         o.outside = outsideEst(o);
         return true;
     }
-    //количество оцениваемых параметров
+    // ... ...... .. df:
+    //   df = StatesCount - NANParamCount - 1
+    // . .. ... ... ... ... . numUnknown .. . . . :
+    //   numEstimated = (m-1) + numUnknown
+    //   (m-1 - .. .. ... ... ... ... .. p_0..p_{m-2} .. ... . .. . .. p_ch, p_adv)
     static int numEstimatedFor(int m, bool isA, int numUnknown)
     {
         const int nAll = theModel(m, isA).libraryParamCount();
         return (nAll - 2) + numUnknown;
     }
 
+    // ----------------------------------------------------------------------
     // Критерий: группировка и X^2 / p-value (PLevel::CPLevel)
+    // ----------------------------------------------------------------------
 
-    // Информативная ячейка: i != 0 и (j == 0 или i == j).
     static bool isInformative(int i, int j)
     {
         return i != 0 && (j == 0 || i == j);
@@ -531,14 +598,13 @@ namespace chi2test {
 
     // Режимы группировки:
     //   0: без группировки, все ячейки   - Tsc::Grouping::NoneGroup
-    //   1: объединение неинформативных ячеек - MergeNonInformative (одна категория) это моя реализация, но сказали без самодеятельности
+    //   1: объединение неинформативных ячеек - MergeNonInformative (одна категория)
     //   2: StandardGroup                  - Tsc::Grouping::StandardGroup
     //   3: AutoGroup                      - Tsc::Grouping::AutoGroup (число групп зависит от данных)
     //   4: ShrinkGroup                    - Tsc::Grouping::ShrinkGroup
     static const int kModeCount = 5;
     static const int kDfDynamic = -1;   // AutoGroup: число групп вычисляется по выборке
 
-    // Название режима группировки по его номеру.
     static const char* modeName(int mode)
     {
         static const char* names[kModeCount] = {
@@ -548,8 +614,7 @@ namespace chi2test {
     }
 
     // df = (число групп) - 1 - (число оцениваемых параметров).
-    // Для AutoGroup число групп вычисляется по данным = kDfDynamic.
-    // с первого взгляда есть в TSC, но это было сделано из за проблем со shrinkgroup
+    // Для AutoGroup число групп вычисляется по данным => kDfDynamic.
     static int chiDf(int m, int mode, int numEstimated)
     {
         int cells = 0;
@@ -563,7 +628,6 @@ namespace chi2test {
         return cells - 1 - numEstimated;
     }
 
-    // Строка описания группировки и df для вывода.
     static std::string dfStr(int m, int mode, int numEstimated)
     {
         const int df = chiDf(m, mode, numEstimated);
@@ -573,9 +637,20 @@ namespace chi2test {
         return os.str();
         return os.str();
     }
+    static void noteMode(int mode)
+    {
+        if (mode != 4) return;
+        static bool noted = false;
+        if (noted) return;
+        noted = true;
+        std::cerr << "Внимание: режим 4 (Tsc::Grouping::ShrinkGroup) не даёт m*m "
+            << "состояний - библиотечная группировка строит sqrt(m*m) групп вместо "
+            << "числа ячеек m*m (ShrinkGroup.h, int len = sqrt(states.size())), "
+            << "поэтому после подгонки число групп перестаёт равняться m*m, "
+            << "и критерий для этого режима не определён.\n";
+    }
 
 
-    // Если df < 1 (кроме динамического) — сообщение об ошибке и выход.
     static void requireDf(int df)
     {
         if (df != kDfDynamic && df < 1) {
@@ -635,7 +710,10 @@ namespace chi2test {
             }
             else if (mode == 4) {
                 Tsc::Grouping::ShrinkGroup<PLevel::uint, double> strategy;
-                // это для shrink
+                // Ограничение: библиотечный ShrinkGroup объединяет состояния по sqrt(состояния)
+                // и настраивается один раз, но он всё равно даёт не m*m ячеек, а m, не m*m.
+                // Режим 4 всё равно бесполезен, даже если вручную выставить CPLevel::Init,
+                // число групп после этого не совпадает с числом ячеек критерия.
                 strategy.setSize(N);
                 strategy.setStates(theoretic);
                 strategy.setLevel(5.0);
@@ -645,7 +723,10 @@ namespace chi2test {
                     static bool warned = false;
                     if (!warned) {
                         warned = true;
-                        std::cerr << "!!!!!!!!!";
+                        std::cerr << "Внимание: Tsc::Grouping::ShrinkGroup для "
+                            << (m * m) << " состояний вернул " << shrink.size()
+                            << " групп (ожидалось sqrt(m*m)=" << m << ")."
+                            << " Режим 4 отключён.\n";
                     }
                     return r;
                 }
@@ -679,7 +760,10 @@ namespace chi2test {
         return r;
     }
 
-    // Все ли совместные вероятности модели строго положительны?
+    // ----------------------------------------------------------------------
+    // Эмпирический размер критерия при известных параметрах
+    // ----------------------------------------------------------------------
+
     static bool modelIsValid(const Params& par, bool model1)
     {
         const std::vector<double> probs = jointProbs(par, model1);
@@ -691,7 +775,10 @@ namespace chi2test {
 
     struct RejRates { double simple; double onestep; };
 
-    // название говорит за себя
+    // ...... ... ... ... .. ..... ...... ... alpha: H0 ...
+    // . ... ....... ....... ....... ... ... ... ......
+    // df ... ... ... ... ... ... ... ... ...... ...
+    // ... ... ... ... ... ... ... ... .. ... ... .. ... .. . .. ..
     static RejRates empiricalRejectionRate(int N, int numTrials, const Params& par,
         bool sampleFromModel1, bool testModel1, double alpha, std::mt19937& rng,
         int numUnknown = 0, int mode = 0)
@@ -724,7 +811,10 @@ namespace chi2test {
         return r;
     }
 
-    // Одна выборка: генерация, оценки библиотекой и p-value для обеих оценок.
+    // ----------------------------------------------------------------------
+    // Один эксперимент: генерация + оценки библиотекой
+    // ----------------------------------------------------------------------
+
     static bool drawTrial(int N, const Params& genPar, bool genIsA,
         const Params& testPar, bool testIsA, int k, std::mt19937& rng,
         Counts& counts, Est& s, Est& o)
@@ -737,7 +827,9 @@ namespace chi2test {
         return libraryEstimates(counts, N, testPar, testIsA, k, s, o);
     }
 
+    // ----------------------------------------------------------------------
     // p-value при оценке параметров по выборке (H0 верна)
+    // ----------------------------------------------------------------------
 
     struct EstPValues {
         std::vector<double> simple, onestep;
@@ -747,7 +839,6 @@ namespace chi2test {
     };
 
 
-    // Собирает p-value по numTrials выборкам при оцениваемых из данных параметрах.
     static EstPValues collectPValuesEstimated(int N, int numTrials, const Params& par,
         bool modelIsA, int numUnknown, std::mt19937& rng, int mode = 0)
     {
@@ -767,7 +858,7 @@ namespace chi2test {
             valid++;
             if (s.outside) os++;
             if (o.outside) oo++;
-            Params ps = par, po = par;  
+            Params ps = par, po = par;  // p_i, p_ch, p_adv - ... ... ... ... ...
             ps.p = s.p; ps.p_ch = s.p_ch; ps.p_adv = s.p_adv;
             po.p = o.p; po.p_ch = o.p_ch; po.p_adv = o.p_adv;
             if (modelIsValid(ps, modelIsA)) {
@@ -791,7 +882,11 @@ namespace chi2test {
         return res;
     }
 
-    // Собирает p-value для выборок модели sampleModelIsA, проверяемых моделью testModelIsA.
+    // ----------------------------------------------------------------------
+    // Выборка от sampleModelIsA с истинными (trueCh, trueAdv),
+    // проверка моделью testModelIsA ("оценка от другой модели")
+    // ----------------------------------------------------------------------
+
     static EstPValues collectPValuesCrossModel(int N, int numTrials, Params par,
         bool sampleModelIsA, double trueCh, double trueAdv,
         bool testModelIsA, int numUnknown, std::mt19937& rng, int mode = 0)
@@ -807,7 +902,7 @@ namespace chi2test {
         genPar.p_adv = trueAdv;
         Params testPar = par;
         testPar.p_adv = trueAdv;
-        testPar.p_ch = trueCh;   
+        testPar.p_ch = trueCh;   // numUnknown == 0: ... ... ... ... ... ...
         for (int t = 0; t < numTrials; t++) {
             Counts counts;
             Est s, o;
@@ -842,7 +937,6 @@ namespace chi2test {
         return res;
     }
 
-    // Записывает массив p-value в CSV-файл.
     static void writePValuesCsv(const std::string& path, const std::vector<double>& pvals)
     {
         std::ofstream out(path.c_str());
@@ -850,7 +944,6 @@ namespace chi2test {
         for (size_t i = 0; i < pvals.size(); ++i) out << pvals[i] << "\n";
     }
 
-    // Доля p-value меньше alpha
     static double rejectionRate(const std::vector<double>& pv, double alpha)
     {
         if (pv.empty()) return 0.0;
@@ -859,7 +952,6 @@ namespace chi2test {
         return static_cast<double>(c) / pv.size();
     }
 
-    // Печатает таблицу по набору уровней alpha.
     static void printRejectionTable(const std::string& name, const std::vector<double>& pv)
     {
         static const double alphas[6] = { 0.01, 0.02, 0.03, 0.04, 0.05, 0.10 };
@@ -869,13 +961,12 @@ namespace chi2test {
         std::cout << "\n";
     }
 
-    // Печатает таблицу мощности по набору уровней alpha.
     static void printPowerTable(double padv, double pch, const std::vector<double>& pv)
     {
         static const double alphas[6] = { 0.01, 0.02, 0.03, 0.04, 0.05, 0.10 };
         std::cout << "модель: p_adv = " << padv << ", p_ch = " << pch
             << ", p_adv*(1-p_ch) = " << padv * (1.0 - pch) << "\n";
-        std::cout << "  мощность               | ";
+        std::cout << "  доля отклонений        | ";
         for (int i = 0; i < 6; ++i)
             std::cout << std::fixed << std::setprecision(3) << rejectionRate(pv, alphas[i]) << "  ";
         std::cout << "\n  уровень значимости a  | ";
@@ -884,9 +975,18 @@ namespace chi2test {
         std::cout << "\n\n";
     }
 
+    // ----------------------------------------------------------------------
     // Мощность в зависимости от p_i
+    // ----------------------------------------------------------------------
 
-    // Мощность в зависимости от p_i; результат пишется в csvPath.
+    static double lowerQuantile(std::vector<double> v, double q)
+    {
+        std::sort(v.begin(), v.end());
+        size_t idx = static_cast<size_t>(std::floor(q * v.size()));
+        if (idx >= v.size()) idx = v.size() - 1;
+        return v[idx];
+    }
+
     static void powerVsP(const Params& par0, const std::vector<std::vector<double> >& pGrid,
         const std::vector<int>& modes, int N, int trials, double alpha,
         int numUnknownAlt, double pch, double padv, std::mt19937& rng,
@@ -901,6 +1001,7 @@ namespace chi2test {
 
         for (size_t mi = 0; mi < modes.size(); ++mi) {
             int mode = modes[mi];
+            noteMode(mode);
             std::cout << "\n--- режим: " << modeName(mode)
                 << ", df = " << dfStr(par0.m, mode, numEstimatedFor(par0.m, true, numUnknownAlt)) << " ---\n";
             std::cout << std::setw(24) << "p" << " |  power\n";
@@ -942,9 +1043,10 @@ namespace chi2test {
         std::cout << "\nРезультаты записаны в " << csvPath << "\n\n";
     }
 
+    // ----------------------------------------------------------------------
     // Проверка согласованности TSC: суммы строк и столбцов
+    // ----------------------------------------------------------------------
 
-    // Проверка согласованности TSC: суммы строк и столбцов.
     static void sanityCheckTsc(const Params& par, int N, std::mt19937& rng)
     {
         int m = par.m;
@@ -975,9 +1077,10 @@ namespace chi2test {
         }
     }
 
+    // ----------------------------------------------------------------------
     // Работа с файлом
+    // ----------------------------------------------------------------------
 
-    // Каталог, где лежит исполняемый файл. Это с работы взял
     static std::string exeDir()
     {
 #if defined(_WIN32)
@@ -992,7 +1095,6 @@ namespace chi2test {
         return std::string();
     }
 
-    // Читает квадратную таблицу частот из файла; m берётся по числу строк.
     static bool readCountsFile(const std::string& path, Counts& counts, int& m)
     {
         std::ifstream in(path.c_str());
@@ -1032,7 +1134,6 @@ namespace chi2test {
     }
 
 
-    // Проверка выборки из файла на принадлежность модели А или Б для всех группировок.
     static void fileSampleCriterion(const std::string& path, const Params& base,
         const std::vector<int>& modes, int numUnknown, bool testIsA, double alpha)
     {
@@ -1085,11 +1186,11 @@ namespace chi2test {
         used[1] = po;
         for (size_t mi = 0; mi < modes.size(); ++mi) {
             int mode = modes[mi];
-            //noteMode(mode);
+            noteMode(mode);
             const int numEstAll = numEstimatedFor(m, testIsA, numUnknown);
             std::cout << "==================================================\n";
             std::cout << "Группировка: " << modeName(mode) << ", df = "
-                << dfStr(m, mode, numEstAll) << " (оценено параметров: " << numEstAll << ")\n";
+                << dfStr(m, mode, numEstAll) << " (оценено параметров: " << numEstAll << ", k = m-1+numUnknown)\n";
             std::cout << "==================================================\n";
             {
                 const int dfCheck = chiDf(m, mode, numEstAll);
@@ -1120,12 +1221,14 @@ namespace chi2test {
         }
     }
 
+    // ----------------------------------------------------------------------
+    // Основной сценарий
+    // ----------------------------------------------------------------------
 
-    // Настройки, проверка файла, эмпирические размеры и мощность.
     static int run()
     {
         setlocale(LC_ALL, "C");
-#if defined(_WIN32) //тож научили
+#if defined(_WIN32)
         {
             HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
             DWORD dwMode = 0;
@@ -1136,7 +1239,8 @@ namespace chi2test {
         // PLevel::CPLevel обращается к дамперу, поэтому он должен быть создан.
         initDumper();
 
-        Params par;   // Параметры модели H0: m, известные p_i, p_ch, p_adv.
+        // ---------------- настройки: как в nw.cpp ----------------
+        Params par;
         par.m = 3;
         par.p_ch = 0.2;
         par.p_adv = 0.05;
@@ -1144,56 +1248,56 @@ namespace chi2test {
         par.p.push_back(0.5); par.p.push_back(0.3); par.p.push_back(0.2);   // p_i
         /*for (int i = 0; i < 6; ++i)
             par.p.push_back(1);*/
-        int N = 300;                // количество людей
-        int numTrials = 1000;        // количество p-values
-        double alpha = 0.05;          // уровень значимости
+        int N = 300;                // sample size
+        int numTrials = 1000;        // Monte Carlo trials
+        double alpha = 0.1;          // уровень значимости
         bool modelIsA = false;        // true: модель А
-        int numUnknown = 2;          // количество неизвестных (0 или 2)
-        int numUnknownAlt = 2;       // для power (0 или 2)
+        int numUnknown = 0;          // numUnknown
+        int numUnknownAlt = 0;       // для power (0 или 1; 2 не проверяется)
         bool fixedSeed = false;      // true: воспроизводимые генерации
-        bool sanityCheck = false;      // отвечает за проверку суммы строк и столбцов
+        bool sanityCheck = false;      // при отладке печатает подробные проверки (число состояний в 1 таблице, их в 2 таблицах)
         g_transposeSample = false;   // true, если категории TSC заданы наоборот
-        std::vector<int> modes;   // Номера режимов группировки для проверки.
+        std::vector<int> modes;
         modes.push_back(0);
-        //modes.push_back(1);  моя реализация (объединение неинформативных ячеек) но сказали без самодеятельности:(
+        //modes.push_back(1); тоже был признан некорректным (объединение неинформативных ячеек, не соответствующее критерию):(
         modes.push_back(2); // Standardgroup: не работает корректно в общем случае
         modes.push_back(3); // Autogroup: не работает корректно в общем случае
         // modes.push_back(4);   // ShrinkGroup: не работает в принципе, есть проблема с реализацией в TSC
         // --- ........ .. ..... ...... ---
         bool checkFileSample = true;         // true: проверить файл
         bool onlyFileSample = true;         // true: только файл
-        std::string fileSamplePath = "DES95765Group.txt";   // Файл с таблицей частот для проверки.
+        std::string fileSamplePath = "DES95765Group.txt";
         // --- мощность в зависимости от p_i ---
-        bool runPowerStudy = false;          // true: выполнить проверку p_i
-        bool onlyPowerStudy = false;         // true: только проверку p_i
-        int psN = 300;   // Размер выборки в исследовании 
-        int psTrials = 1000;   // Число p_val
-        double psAlpha = 0.05;   // Уровень значимости для таблицы мощности.
-        int psUnknown = 2;   // numUnknown для powerVsP.
-        double psPch = 0.2, psPadv = 0.05;   // p_ch и p_adv для powerVsP.
+        bool runPowerStudy = false;          // true: выполнить study
+        bool onlyPowerStudy = false;         // true: только мощность
+        int psN = 100;
+        int psTrials = 1000;
+        double psAlpha = 0.05;
+        int psUnknown = 0;
+        double psPch = 0.2, psPadv = 0.05;
         std::vector<std::vector<double> > pGrid;
         const double p0s[7] = { 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8 };
         for (int k = 0; k < 7; ++k) {
-            double p0 = p0s[k];   // Первое значение p_0 в сетке.
-            std::vector<double> v;   // Вектор p_i для оставшихся p_i.
+            double p0 = p0s[k];
+            std::vector<double> v;
             v.push_back(p0); v.push_back((1.0 - p0) * 0.6); v.push_back((1.0 - p0) * 0.4);
             pGrid.push_back(v);
         }
         const double ss[5] = { 0.5, 0.6, 0.7, 0.8, 0.9 };
         for (int k = 0; k < 5; ++k) {
-            std::vector<double> v;   // Вектор p_i для оставшихся p_i.
+            std::vector<double> v;
             v.push_back(0.5); v.push_back(0.5 * ss[k]); v.push_back(0.5 * (1.0 - ss[k]));
             pGrid.push_back(v);
         }
         // ------------------------------------------------------------
         if (sanityCheck) { return 0; }
-        //не актуально но исправлять такого не мало
+
         if (numUnknown < 0 || numUnknown > 2 || numUnknownAlt < 0 || numUnknownAlt > 2) {
             std::cerr << "numUnknown и numUnknownAlt должны быть 0, 1 или 2\n";
             return 1;
         }
 
-        double sumP = std::accumulate(par.p.begin(), par.p.end(), 0.0);   // Сумма p_i перед нормировкой.
+        double sumP = std::accumulate(par.p.begin(), par.p.end(), 0.0);
         for (size_t k = 0; k < par.p.size(); ++k) par.p[k] /= sumP;
 
         std::mt19937 rng(fixedSeed ? 12345u : std::random_device()());
@@ -1202,7 +1306,9 @@ namespace chi2test {
             << ", N = " << N << ", numTrials = " << numTrials << "\n";
         std::cout << "модель H0: модель " << (modelIsA ? "А" : "Б")
             << ", оцениваемых параметров: " << numUnknown << "\n\n";
-        const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);   // Общее число оцениваемых параметров при текущем numUnknown.
+        // df, ... ... ... ... ... ... TSCCalc (model.cpp:268):
+        //   df = StatesCount - NANParamCount - 1
+        const int numEstAll = numEstimatedFor(par.m, modelIsA, numUnknown);
 
 
         if (sanityCheck) sanityCheckTsc(par, N, rng);
@@ -1211,15 +1317,15 @@ namespace chi2test {
             if (onlyFileSample) return 0;
         }
 
-        // теоретические частоты (проверка условия N*p_ij >= 5) 
+        // --- теоретические частоты (проверка условия N*p_ij >= 5) ---
         {
-            std::vector<double> pr = jointProbs(par, modelIsA);   
-            int nSmall = 0;   // Число ячеек с N*p_ij < 5.
-            double restMass = 0.0;   // Суммарная вероятность неинформативной части при H0.
+            std::vector<double> pr = jointProbs(par, modelIsA);
+            int nSmall = 0;
+            double restMass = 0.0;
             std::cout << "Ожидаемые частоты N*p_ij:\n";
             for (int i = 0; i < par.m; i++) {
                 for (int j = 0; j < par.m; j++) {
-                    double e = N * pr[i * par.m + j];   // Ожидаемая частота N*p_ij в текущей ячейке.
+                    double e = N * pr[i * par.m + j];
                     if (e < 5.0) nSmall++;
                     if (!isInformative(i, j)) restMass += pr[i * par.m + j];
                     std::cout << std::setw(9) << std::fixed << std::setprecision(1) << e;
@@ -1230,7 +1336,7 @@ namespace chi2test {
             std::cout << "неинформативная часть при H0 (pi_rest): "
                 << std::setprecision(3) << restMass << "\n\n";
         }
-        
+
         if (runPowerStudy) {
             if (psUnknown < 0 || psUnknown > 2) {
                 std::cerr << "psUnknown должен быть 0, 1 или 2\n"; return 1;
@@ -1240,11 +1346,12 @@ namespace chi2test {
             if (onlyPowerStudy) return 0;
         }
 
-        // удобная таблица 
+        // --- эмпирические размеры критерия ---
         for (size_t mi = 0; mi < modes.size(); ++mi) {
-            int mode = modes[mi];   // Текущий режим группировки.
+            int mode = modes[mi];
+            noteMode(mode);
             {
-                const int dfCheck = chiDf(par.m, mode, numEstAll);   // df для проверки применимости критерия.
+                const int dfCheck = chiDf(par.m, mode, numEstAll);
                 if (dfCheck != kDfDynamic && dfCheck < 1) {
                     std::cout << "==================================================\n";
                     std::cout << "Режим: " << modeName(mode) << ", df = " << dfCheck
@@ -1259,20 +1366,20 @@ namespace chi2test {
                 << ", df (расчётный) = " << dfStr(par.m, mode, numEstAll) << "\n";
             std::cout << "==================================================\n\n";
 
-            RejRates typeI = empiricalRejectionRate(N, numTrials, par, modelIsA, modelIsA, alpha, rng, numUnknown, mode);   // ошибка 1 рода
-            RejRates power = empiricalRejectionRate(N, numTrials, par, modelIsA, !modelIsA, alpha, rng, numUnknown, mode);   // мощность при верной альтернативе
-            std::cout << "Эмпирическая часть, alpha = " << alpha << ":\n";
-            std::cout << "  Ошибка первого рода (H0 верен): simple = " << typeI.simple
+            RejRates typeI = empiricalRejectionRate(N, numTrials, par, modelIsA, modelIsA, alpha, rng, numUnknown, mode);
+            RejRates power = empiricalRejectionRate(N, numTrials, par, modelIsA, !modelIsA, alpha, rng, numUnknown, mode);
+            std::cout << "Эмпирические размеры, alpha = " << alpha << ":\n";
+            std::cout << "  Размер критерия (H0 верен): simple = " << typeI.simple
                 << ", one-step = " << typeI.onestep << "\n";
             std::cout << "  Мощность при H0 неверна: simple = " << power.simple
                 << ", one-step = " << power.onestep << "\n\n";
 
-            std::ostringstream modeStr;   // Номер режима строкой для имени CSV-файла.
+            std::ostringstream modeStr;
             modeStr << mode;
-            EstPValues pv = collectPValuesEstimated(N, numTrials, par, modelIsA, numUnknown, rng, mode);   // Собранные p-value при оцениваемых параметрах.
+            EstPValues pv = collectPValuesEstimated(N, numTrials, par, modelIsA, numUnknown, rng, mode);
             writePValuesCsv("pvalues_simple_mode" + modeStr.str() + ".csv", pv.simple);
             writePValuesCsv("pvalues_onestep_mode" + modeStr.str() + ".csv", pv.onestep);
-            std::cout << "Ошибка первого рода при верной H0 (df = " << dfStr(par.m, mode, numEstAll) << "):\n";
+            std::cout << "Размер критерия при H0 (df = " << dfStr(par.m, mode, numEstAll) << "):\n";
             std::cout << "     alpha | 0.010  0.020  0.030  0.040  0.050  0.100\n";
             printRejectionTable("simple", pv.simple);
             printRejectionTable("one-step", pv.onestep);
@@ -1284,13 +1391,13 @@ namespace chi2test {
             std::cout << "p-value записаны в pvalues_simple_mode" << mode
                 << ".csv и pvalues_onestep_mode" << mode << ".csv\n\n";
 
-            // мощность
+            // Оценка от другой модели (мощность)
             {
-                std::cout << "--- мощность, оцениваемых параметров: "
+                std::cout << "--- оценка от другой модели, оцениваемых параметров: "
                     << numUnknownAlt << " (" << modeName(mode) << ") ---\n";
-                int powN = 500;   // Размер выборки 
-                int powTrials = 1000;   // количество p_value
-                const int dfHere = chiDf(par.m, mode, numEstimatedFor(par.m, modelIsA, numUnknownAlt));   // df при numUnknownAlt для проверки применимости.
+                int powN = 500;
+                int powTrials = 1000;
+                const int dfHere = chiDf(par.m, mode, numEstimatedFor(par.m, modelIsA, numUnknownAlt));
                 if (dfHere != kDfDynamic && dfHere < 1) {
                     std::cout << "df < 1, пропуск\n\n";
                     continue;
@@ -1301,8 +1408,7 @@ namespace chi2test {
                 //grid.push_back(std::make_pair(0.2, 0.8));
                 //grid.push_back(std::make_pair(0.1, 0.9));
                 for (size_t gi = 0; gi < grid.size(); ++gi) {
-                    double padv = grid[gi].first, pch = grid[gi].second; 
- 
+                    double padv = grid[gi].first, pch = grid[gi].second;
                     EstPValues cross = collectPValuesCrossModel(powN, powTrials, par,
                         /*sampleModelIsA=*/true, pch, padv,
                         /*testModelIsA=*/false, numUnknownAlt, rng, mode);
@@ -1322,7 +1428,7 @@ namespace chi2test {
         return 0;
     }
 
-}
+} // namespace chi2test
 
 int main()
 {
